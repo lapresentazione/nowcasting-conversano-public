@@ -38,8 +38,10 @@ def decide(old, level, scan_time):
         if state["quiet"] > 0:
             state.update(quiet=0, last_scan=scan_time)
             return state, False, True
-        # Con episodio attivo e nessun cambio livello, non serve un commit.
-        return state, False, False
+        # Aggiorna l'ultima scansione valida anche durante pioggia continua.
+        # Evita che una scansione gia' elaborata venga contata due volte.
+        state["last_scan"] = scan_time
+        return state, False, True
     if not state["active"]:
         return state, False, False
     state["quiet"] += 1
