@@ -2,6 +2,14 @@ name: Radar avvisi - verifica manuale
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'nowcasting.py'
+      - 'alert_runner.py'
+      - 'test_alert_runner.py'
+      - 'requirements.txt'
+      - '.github/workflows/radar-alert-check.yml'
 
 permissions:
   contents: read
