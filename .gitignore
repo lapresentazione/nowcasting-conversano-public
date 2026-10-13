@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+*.tif
+*.zip
+stato_nowcasting.json
