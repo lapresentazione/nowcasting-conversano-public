@@ -19,8 +19,9 @@ class RadarStateTest(unittest.TestCase):
         active, _, _ = decide(state(), 1, 300000)
         same, alert, save = decide(active, 1, 600000)
         self.assertFalse(alert)
-        self.assertFalse(save)
-        self.assertEqual(same, active)
+        self.assertTrue(save)
+        self.assertEqual(same["last_scan"], 600000)
+        self.assertEqual(same["level"], 1)
 
     def test_stronger_event_alert(self):
         active, _, _ = decide(state(), 1, 300000)
@@ -56,6 +57,22 @@ class RadarStateTest(unittest.TestCase):
         self.assertFalse(alert)
         self.assertFalse(save)
         self.assertEqual(s, DEFAULT)
+
+    def test_same_frame_twice_cannot_raise_new_event(self):
+        active, _, _ = decide(state(), 1, 300000)
+        again, alert, save = decide(active, 2, 300000)
+        self.assertFalse(alert)
+        self.assertFalse(save)
+        self.assertEqual(again, active)
+
+    def test_continuous_rain_is_not_notified_again(self):
+        active, _, _ = decide(state(), 1, 300000)
+        for timestamp in (600000, 900000, 1200000, 1500000):
+            active, alert, save = decide(active, 1, timestamp)
+            self.assertFalse(alert)
+            self.assertTrue(save)
+        self.assertEqual(active["last_scan"], 1500000)
+        self.assertEqual(active["last_alert_scan"], 300000)
 
 
 if __name__ == "__main__":
