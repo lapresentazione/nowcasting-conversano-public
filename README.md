@@ -2,15 +2,17 @@
 
 Progetto sperimentale per osservare le precipitazioni stimate dal radar della Protezione Civile intorno alla stazione meteorologica **PGL320** (Conversano-San Vito, coordinate 40.976 N, 17.13 E). Non è un sistema ufficiale di allerta e non garantisce l'anticipo sull'arrivo della pioggia.
 
-## Stato: solo test manuali
+## Stato: monitoraggio programmato sperimentale
 
-**Nessun monitoraggio programmato è attivo.** Tutti i workflow presenti sono attivabili esclusivamente a mano con `workflow_dispatch`:
+**Workflow di sorveglianza configurato ogni 10 minuti**, con orari UTC ai minuti 09, 19, 29, 39, 49 e 59. La reale puntualità dipende da GitHub Actions e dalla disponibilità dei dati DPC. Il primo ciclo del workflow programmato deve ancora essere verificato nei log.
+
+Il workflow di sorveglianza si trova in `.github/workflows/radar-watch.yml`: legge due scansioni SRI, invia messaggi **solo se** trova un episodio che raggiunge le soglie sperimentali e aggiorna lo stato dell'episodio in `state/stato_avvisi.json`. Il registro di stato è pubblico (timestamp e livelli, non segreti). Gli altri workflow servono per i test:
 
 - **Radar Conversano - prova manuale**: legge due scansioni radar senza inviare notifiche.
 - **Radar avvisi - verifica manuale**: esegue test di gestione degli episodi e simulazione senza invio.
 - **Telegram - messaggio di prova**: invia *un solo* messaggio di prova quando sono configurati i segreti.
 
-Il monitoraggio automatico e le notifiche radar non sono ancora attivi: saranno configurati solo dopo i collaudi.
+La lettura programmata e gli avvisi radar sono stati configurati dopo il superamento di otto test automatici e di una lettura radar di prova; verificare le prime esecuzioni pianificate nella pagina Actions.
 
 ## Funzionamento sperimentale
 
@@ -33,8 +35,17 @@ Le soglie locali attuali, ancora da calibrare, distinguono pioggia entro 5 km e 
 
 In GitHub apri **Actions**, seleziona il workflow da collaudare, poi **Run workflow** sul ramo `main`. Per provare il radar senza invio di notifiche esegui prima **Radar avvisi - verifica manuale** e controlla l'esito dei test.
 
-## Prima dell'attivazione automatica
+## Limiti operativi e manutenzione
 
-Vanno ancora eseguiti i test nel nuovo repository e verificati i segreti Telegram, i permessi di scrittura necessari allo stato persistente, le condizioni di concorrenza dei job e gli effetti della frequenza dei controlli. Prima di aggiungere uno schedule occorre verificarne limiti, qualità dei dati e latenza effettiva.
+- GitHub esegue normalmente una verifica ogni 10 minuti, ma le attività pianificate possono essere ritardate o saltate.
+- Il radar SRI ha una latenza variabile rispetto alla scansione osservata: non è garantito un anticipo sull'inizio della pioggia.
+- Gli avvisi indicano **pioggia stimata nelle vicinanze**, non necessariamente precipitazioni in arrivo sulla PGL320, né presenza di fulmini.
+- Le soglie sono sperimentali e possono produrre falsi avvisi o mancare eventi; non sostituiscono le allerte ufficiali.
+- In caso di perdita di connettività o dati radar scaduti il job segnala un errore nei log, ma non invia automaticamente un messaggio di guasto su Telegram.
+- I workflow pianificati dei repository pubblici GitHub sono disattivati automaticamente dopo 60 giorni senza attività del repository; verificare periodicamente il pannello Actions.
+- I runner standard nei repository pubblici sono gratuiti secondo la documentazione GitHub; possibili vincoli diversi per runner a pagamento, storage o altre risorse.
+- Per disattivare: aprire **Actions → PGL320 - sorveglianza radar automatica → Disable workflow**.
+- Nel caso raro in cui Telegram confermi un invio e il successivo salvataggio dello stato fallisca, può ripetersi una notifica; il sistema non garantisce consegna e deduplicazione assolute.
+
 
 Licenza: nessuna concessione generale di riutilizzo dichiarata in questa fase.
