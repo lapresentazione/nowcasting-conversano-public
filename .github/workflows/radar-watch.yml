@@ -1,0 +1,49 @@
+name: PGL320 - sorveglianza radar automatica
+
+on:
+  schedule:
+    # Ogni 10 minuti, sfalsato dall'inizio dell'ora (orario UTC).
+    - cron: '9,19,29,39,49,59 * * * *'
+  workflow_dispatch:
+
+# Impedisce sovrapposizioni tra due letture/scritture del registro.
+concurrency:
+  group: pgl320-radar-state
+  cancel-in-progress: false
+
+# Solo questo workflow puo' aggiornare il registro degli episodi.
+permissions:
+  contents: write
+
+jobs:
+  sorveglianza:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Scarica codice verificato
+        uses: actions/checkout@v4
+
+      - name: Configura Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Installa dipendenze
+        run: python -m pip install -r requirements.txt
+
+      - name: Controlla disponibilita' dei segreti Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          test -n "$TELEGRAM_BOT_TOKEN" || { echo "Manca il segreto TELEGRAM_BOT_TOKEN"; exit 1; }
+          test -n "$TELEGRAM_CHAT_ID" || { echo "Manca il segreto TELEGRAM_CHAT_ID"; exit 1; }
+
+      - name: Analizza due scansioni radar e notifica nuovi episodi
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python alert_runner.py --notify
