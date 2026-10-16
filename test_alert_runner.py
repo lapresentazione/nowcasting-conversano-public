@@ -1,6 +1,11 @@
 import unittest
 
-from alert_runner import decide, DEFAULT
+import csv
+import io
+from datetime import datetime, timezone
+
+from alert_runner import (decide, DEFAULT, STALE_MS, append_csv, build_rows,
+                          LOG_FIELDS, log_path)
 
 
 def state():
@@ -73,6 +78,63 @@ class RadarStateTest(unittest.TestCase):
             self.assertTrue(save)
         self.assertEqual(active["last_scan"], 1500000)
         self.assertEqual(active["last_alert_scan"], 300000)
+
+    def test_stale_episode_allows_new_alert(self):
+        active, _, _ = decide(state(), 1, 300000)
+        later = 300000 + STALE_MS + 300000
+        st, alert, save = decide(active, 1, later)
+        self.assertTrue(alert)
+        self.assertTrue(save)
+        self.assertEqual(st["last_alert_scan"], later)
+
+    def test_stale_episode_closed_when_dry(self):
+        active, _, _ = decide(state(), 2, 300000)
+        later = 300000 + STALE_MS + 300000
+        st, alert, save = decide(active, 0, later)
+        self.assertFalse(alert)
+        self.assertTrue(save)
+        self.assertFalse(st["active"])
+        self.assertEqual(st["level"], 0)
+        self.assertEqual(st["last_alert_scan"], 300000)
+
+    def test_not_stale_within_limit(self):
+        active, _, _ = decide(state(), 1, 300000)
+        st, alert, _ = decide(active, 1, 300000 + STALE_MS)
+        self.assertFalse(alert)
+        self.assertTrue(st["active"])
+
+
+def fake_obs(when, point=0.0):
+    stats = {r: {"coverage": 1.0, "max_mm_h": 0.0, "cells_ge_1": 0,
+                 "cells_ge_5": 0, "cells_ge_10": 0} for r in ("5", "10", "20", "40")}
+    return {"when": when, "point": point, "stats": stats}
+
+
+class RegistroTest(unittest.TestCase):
+    RUN = datetime(2026, 10, 16, 9, 19, tzinfo=timezone.utc)
+
+    def test_header_once_and_rows(self):
+        base = {"run_utc": "2026-10-16T09:19:00Z", "esito": "ok", "livello": 0}
+        t0 = int(self.RUN.timestamp() * 1000) - 15 * 60_000
+        rows = build_rows(base, [fake_obs(t0 - 300000), fake_obs(t0, None)], self.RUN)
+        text = append_csv("", rows)
+        text = append_csv(text, rows)
+        data = list(csv.DictReader(io.StringIO(text)))
+        self.assertEqual(len(data), 4)
+        self.assertEqual(text.count("run_utc,"), 1)
+        self.assertEqual(data[1]["ruolo_scansione"], "ultima")
+        self.assertEqual(data[1]["punto_mm_h"], "")
+        self.assertEqual(data[1]["ritardo_scan_min"], "15.0")
+        self.assertEqual(list(data[0].keys()), LOG_FIELDS)
+
+    def test_error_row_without_scans(self):
+        rows = build_rows({"esito": "errore_radar", "dettaglio": "ValueError"}, [], self.RUN)
+        data = list(csv.DictReader(io.StringIO(append_csv("", rows))))
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["esito"], "errore_radar")
+
+    def test_daily_path(self):
+        self.assertEqual(log_path(self.RUN), "registro/2026/2026-10-16.csv")
 
 
 if __name__ == "__main__":
