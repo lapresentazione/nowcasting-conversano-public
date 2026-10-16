@@ -47,3 +47,12 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python alert_runner.py --notify
+
+      - name: Controlla temporali METAR Gioia del Colle e Bari e notifica nuovi episodi
+        # Gira anche se il passaggio radar non e' riuscito.
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python metar_watch.py --notify

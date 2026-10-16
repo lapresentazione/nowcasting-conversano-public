@@ -8,6 +8,8 @@ on:
       - 'nowcasting.py'
       - 'alert_runner.py'
       - 'test_alert_runner.py'
+      - 'metar_watch.py'
+      - 'test_metar_watch.py'
       - 'requirements.txt'
       - '.github/workflows/radar-alert-check.yml'
 
@@ -28,7 +30,14 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Verifica blocco duplicati e gestione episodi
         run: python -m unittest -v test_alert_runner.py
+      - name: Verifica regole temporali METAR
+        run: python -m unittest -v test_metar_watch.py
       - name: Valuta radar e stato in simulazione, senza inviare avvisi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python alert_runner.py --dry-run
+      - name: Valuta METAR in simulazione, senza inviare avvisi
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python metar_watch.py --dry-run
