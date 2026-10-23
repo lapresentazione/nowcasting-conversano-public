@@ -1,3 +1,5 @@
 run_utc,run_id,esito,dettaglio,ruolo_scansione,scan_utc,scan_ora_italiana,ritardo_scan_min,livello,motivo,punto_mm_h,copertura_5km,max_mm_h_5km,celle_ge1_5km,celle_ge5_5km,celle_ge10_5km,copertura_10km,max_mm_h_10km,celle_ge1_10km,celle_ge5_10km,celle_ge10_10km,copertura_20km,max_mm_h_20km,celle_ge1_20km,celle_ge5_20km,celle_ge10_20km,copertura_40km,max_mm_h_40km,celle_ge1_40km,celle_ge5_40km,celle_ge10_40km,notifica_inviata,episodio_attivo,livello_episodio,episodio_scaduto
 2026-10-23T00:06:38Z,39876058772,ok,,precedente,2026-10-22T23:50:00Z,23/10/2026 01:50,16.6,0,sotto soglia,0.0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,0,0,0,0
 2026-10-23T00:06:38Z,39876058772,ok,,ultima,2026-10-22T23:55:00Z,23/10/2026 01:55,11.6,0,sotto soglia,0.0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,0,0,0,0
+2026-10-23T00:49:04Z,39880334675,ok,,precedente,2026-10-23T00:35:00Z,23/10/2026 02:35,14.1,0,sotto soglia,0.0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,0,0,0,0
+2026-10-23T00:49:04Z,39880334675,ok,,ultima,2026-10-23T00:40:00Z,23/10/2026 02:40,9.1,0,sotto soglia,0.0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,0,0,0,0
