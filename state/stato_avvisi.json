@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "active": false,
-  "level": 0,
+  "active": true,
+  "level": 1,
   "quiet": 0,
-  "last_scan": 1792593000000,
-  "last_alert_scan": 1792569000000
+  "last_scan": 1792854000000,
+  "last_alert_scan": 1792854000000
 }
