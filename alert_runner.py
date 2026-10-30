@@ -10,6 +10,18 @@ Versione 2 (registro esecuzioni):
 - un episodio attivo senza scansioni valide elaborate da oltre STALE_MS viene
   chiuso d'ufficio, così una pioggia successiva produce di nuovo un avviso.
 Il formato di state/stato_avvisi.json non cambia.
+
+Versione 3 (esecuzioni regolari e recupero, 30/10/2026):
+- ogni esecuzione elabora tutte le scansioni SRI pubblicate dopo l'ultima già
+  elaborata (stato + registro), fino a MAX_NEW_SCANS, in ordine cronologico:
+  un'esecuzione saltata o ritardata non fa più perdere scansioni;
+- pensato per l'avvio esterno regolare (workflow_dispatch da Google Apps
+  Script, vedi apps_script/RadarDispatch.gs); il cron resta come riserva;
+- STALE_MS portato a 120 minuti (tampone contro i ritardi di GitHub);
+- una riga di registro per ogni scansione nuova (ruolo "ultima" o
+  "intermedia"); se non c'è nulla di nuovo, una riga "gia_elaborata" con
+  esito "nessuna_novita" (segnale di vita). La colonna dettaglio riporta il
+  tipo di avvio (evento=schedule / workflow_dispatch).
 """
 import argparse
 import base64
@@ -22,12 +34,19 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 import requests
-from nowcasting import get_scans, evaluate, message, ITALY
+from nowcasting import (new_session, last_product_time, download_scan,
+                        evaluate, message, ITALY, STEP)
 
 FILE_PATH = "state/stato_avvisi.json"
 LOG_DIR = "registro"
-STALE_MS = 60 * 60_000  # 60 minuti senza scansioni valide elaborate
-INSUFFICIENT = ("scansioni non consecutive", "copertura o cella locale insufficiente")
+STALE_MS = 120 * 60_000  # 120 minuti senza scansioni valide elaborate
+# Scansioni nuove elaborate al massimo per esecuzione (12 x 5 min = 60 min).
+MAX_NEW_SCANS = int(os.environ.get("RADAR_MAX_SCANS", "12"))
+# Oltre questo ritardo il messaggio dichiara che l'avviso arriva in recupero.
+LATE_NOTE_MIN = 20
+MISSING = "scansione mancante"
+INSUFFICIENT = ("scansioni non consecutive", "copertura o cella locale insufficiente",
+                "scansione mancante")
 DEFAULT = {
     "version": 1, "active": False, "level": 0, "quiet": 0,
     "last_scan": 0, "last_alert_scan": 0,
@@ -111,7 +130,10 @@ def scan_fields(obs, run_dt):
 
 
 def build_rows(base, scans, run_dt):
-    """Una riga per scansione (precedente, ultima); una sola riga se mancano."""
+    """Una riga per scansione (precedente, ultima); una sola riga se mancano.
+
+    Formato delle versioni precedenti, mantenuto per compatibilità.
+    """
     if not scans:
         return [dict(base)]
     rows = []
@@ -121,6 +143,133 @@ def build_rows(base, scans, run_dt):
         row.update(scan_fields(obs, run_dt))
         rows.append(row)
     return rows
+
+
+def time_fields(when, run_dt):
+    """Campi del registro di una scansione nota solo per l'ora (non scaricata)."""
+    return {
+        "scan_utc": iso_utc(when),
+        "scan_ora_italiana": datetime.fromtimestamp(when / 1000, ITALY)
+        .strftime("%d/%m/%Y %H:%M"),
+        "ritardo_scan_min": round((run_dt.timestamp() * 1000 - when) / 60_000, 1),
+    }
+
+
+PROCESSED_ROLES = ("ultima", "intermedia")
+PROCESSED_OUTCOMES = ("ok", "dati_insufficienti")
+
+
+def last_processed_in_log(text):
+    """Ora (ms) dell'ultima scansione già elaborata secondo un CSV di registro."""
+    best = 0
+    for row in csv.DictReader(io.StringIO(text or "")):
+        if row.get("ruolo_scansione") not in PROCESSED_ROLES:
+            continue
+        if row.get("esito") not in PROCESSED_OUTCOMES:
+            continue
+        try:
+            dt = datetime.strptime(row["scan_utc"], "%Y-%m-%dT%H:%M:%SZ")
+        except (KeyError, TypeError, ValueError):
+            continue
+        best = max(best, int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000))
+    return best
+
+
+def read_log_text(token, path):
+    resp = github_request("GET", path, token)
+    if resp.status_code == 404:
+        return ""
+    resp.raise_for_status()
+    return base64.b64decode(resp.json()["content"]).decode("utf-8")
+
+
+def last_processed_from_logs(token, run_dt):
+    """Ultima scansione elaborata secondo il registro di oggi (o di ieri)."""
+    from datetime import timedelta
+    for day in (run_dt, run_dt - timedelta(days=1)):
+        found = last_processed_in_log(read_log_text(token, log_path(day)))
+        if found:
+            return found
+    return 0
+
+
+def plan_new_times(latest, last_done, max_new=None):
+    """Ore delle scansioni da elaborare, in ordine cronologico.
+
+    Tutte quelle a passo STEP dopo last_done fino a latest, al massimo max_new
+    (le più recenti). Lista vuota se latest è già stata elaborata.
+    """
+    max_new = MAX_NEW_SCANS if max_new is None else max_new
+    times = []
+    t = latest
+    while t > last_done and len(times) < max_new:
+        times.append(t)
+        t -= STEP
+    return sorted(times)
+
+
+def late_note(message_text, when, run_dt):
+    delay = (run_dt.timestamp() * 1000 - when) / 60_000
+    if delay <= LATE_NOTE_MIN:
+        return message_text
+    return (message_text + f"\nNota: avviso inviato {delay:.0f} min dopo la scansione "
+            "(recupero di scansioni arretrate).")
+
+
+class PartialFailure(Exception):
+    """Errore a metà elaborazione: conserva lo stato già consolidato."""
+
+    def __init__(self, stage, error, state, save, rows):
+        super().__init__(f"{stage}: {type(error).__name__}")
+        self.stage, self.error = stage, error
+        self.state, self.save, self.rows = state, save, rows
+
+
+def process_scans(state, obs_by_time, new_times, run_dt, base, send):
+    """Applica decide() a ogni scansione nuova, in ordine cronologico.
+
+    obs_by_time: ora -> osservazione (None se il download non è riuscito);
+    deve contenere anche la scansione che precede la prima nuova.
+    send(testo) invia un avviso. Restituisce (stato, salvataggio?, righe).
+    Se un invio fallisce solleva PartialFailure con lo stato consolidato
+    prima di quella scansione, così gli avvisi già partiti non si ripetono.
+    """
+    rows, save = [], False
+    for i, when in enumerate(new_times):
+        role = "ultima" if i == len(new_times) - 1 else "intermedia"
+        cur, prev = obs_by_time.get(when), obs_by_time.get(when - STEP)
+        row = dict(base, ruolo_scansione=role, notifica_inviata=0)
+        if cur is None:
+            row.update(time_fields(when, run_dt))
+        else:
+            row.update(scan_fields(cur, run_dt))
+        if cur is None or prev is None:
+            level, reason = 0, MISSING
+        else:
+            level, reason = evaluate(prev, cur)
+        row.update(livello=level, motivo=reason)
+        if reason in INSUFFICIENT:
+            row.update(esito="dati_insufficienti",
+                       episodio_attivo=int(state["active"]),
+                       livello_episodio=state["level"])
+            rows.append(row)
+            continue
+        expired = is_stale(state, when)
+        next_state, alert, step_save = decide(state, level, when)
+        if alert:
+            try:
+                send(late_note(message(cur, level, reason), when, run_dt))
+            except Exception as error:
+                row.update(esito="errore_telegram",
+                           dettaglio=f"{base.get('dettaglio', '')}; {type(error).__name__}")
+                rows.append(row)
+                raise PartialFailure("telegram", error, state, save, rows) from error
+            row["notifica_inviata"] = 1
+        state, save = next_state, save or step_save
+        row.update(esito="ok", episodio_attivo=int(state["active"]),
+                   livello_episodio=state["level"], episodio_scaduto=int(expired))
+        rows.append(row)
+    return state, save, rows
 
 
 def append_csv(existing_text, rows):
@@ -248,6 +397,25 @@ def send_telegram(text):
 
 # --------------------------------------------------------------------- main
 
+def fetch_observations(session, new_times):
+    """Scarica le scansioni nuove e quella che precede la prima.
+
+    Un download non riuscito vale None (coppia insufficiente), tranne per la
+    scansione più recente: in quel caso l'errore si propaga.
+    """
+    obs, missing = {}, []
+    wanted = [new_times[0] - STEP] + list(new_times)
+    for when in wanted:
+        try:
+            obs[when] = download_scan(session, when)
+        except Exception:
+            if when == new_times[-1]:
+                raise
+            obs[when] = None
+            missing.append(datetime.fromtimestamp(when / 1000, ITALY).strftime("%H:%M"))
+    return obs, missing
+
+
 def main():
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
@@ -258,28 +426,19 @@ def main():
     args = parser.parse_args()
 
     run_dt = datetime.now(timezone.utc)
+    event = os.environ.get("GITHUB_EVENT_NAME", "locale")
     base = {"run_utc": run_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "run_id": os.environ.get("GITHUB_RUN_ID", ""),
-            "notifica_inviata": 0}
-    scans = []
+            "notifica_inviata": 0, "dettaglio": f"evento={event}"}
+    rows = []
     stage = "radar"
     try:
-        a, b = get_scans()
-        scans = [a, b]
-        level, reason = evaluate(a, b)
-        base.update(livello=level, motivo=reason)
-        timestamp = datetime.fromtimestamp(b["when"] / 1000, ITALY)
-        print(f"Radar {timestamp.isoformat()} PGL320={b['point']} "
-              f"livello={level}, {reason}")
-
-        if reason in INSUFFICIENT:
-            print("Dati insufficienti; stato non modificato.")
-            base["esito"] = "dati_insufficienti"
-            write_log(args, build_rows(base, scans, run_dt), run_dt)
-            return
+        session = new_session()
+        latest = last_product_time(session)
 
         stage = "stato"
         github_token = os.environ.get("GITHUB_TOKEN", "").strip()
+        log_done = 0
         if not github_token:
             if args.notify:
                 raise RuntimeError("GITHUB_TOKEN assente: avvisi disabilitati")
@@ -287,35 +446,72 @@ def main():
             print("Controllo senza accesso allo stato GitHub")
         else:
             state, sha = load_state(github_token)
+            try:
+                log_done = last_processed_from_logs(github_token, run_dt)
+            except Exception as error:
+                # Senza registro si riparte dallo stato: al più si rielaborano
+                # scansioni già viste, senza effetti (vedi decide()).
+                print(f"Registro non letto: {type(error).__name__}", file=sys.stderr)
+        last_done = max(int(state["last_scan"]), log_done)
+        new_times = plan_new_times(latest, last_done)
 
-        expired = is_stale(state, b["when"])
-        next_state, should_alert, should_save = decide(state, level, b["when"])
-        base.update(episodio_attivo=int(next_state["active"]),
-                    livello_episodio=next_state["level"],
-                    episodio_scaduto=int(expired))
-        if args.dry_run:
-            print(f"SOLO SIMULAZIONE: notifica={should_alert}, "
-                  f"salvataggio={should_save}, episodio_attivo={next_state['active']}, "
-                  f"episodio_scaduto={expired}")
-            base["esito"] = "ok"
-            write_log(args, build_rows(base, scans, run_dt), run_dt)
+        if not new_times:
+            row = dict(base, esito="nessuna_novita", ruolo_scansione="gia_elaborata",
+                       episodio_attivo=int(state["active"]),
+                       livello_episodio=state["level"])
+            row.update(time_fields(latest, run_dt))
+            rows = [row]
+            print("Nessuna scansione nuova dopo "
+                  f"{datetime.fromtimestamp(last_done / 1000, ITALY):%d/%m %H:%M}.")
+            write_log(args, rows, run_dt)
             return
-        if should_alert:
-            stage = "telegram"
-            send_telegram(message(b, level, reason))
-            base["notifica_inviata"] = 1
-            print("Telegram: messaggio accettato")
+
+        stage = "radar"
+        obs, missing = fetch_observations(session, new_times)
+        base["dettaglio"] += f"; nuove={len(new_times)}"
+        if missing:
+            base["dettaglio"] += "; mancanti=" + ",".join(missing)
+
+        stage = "elaborazione"
+        if args.dry_run:
+            sent = []
+            send = sent.append
+        else:
+            send = send_telegram
+        try:
+            next_state, should_save, rows = process_scans(
+                state, obs, new_times, run_dt, base, send)
+        except PartialFailure as failure:
+            rows = failure.rows
+            if failure.save and not args.dry_run:
+                persist_state(github_token, failure.state, sha)
+                print("Stato consolidato salvato prima dell'errore")
+            stage = failure.stage
+            raise failure.error
+
+        for row in rows:
+            print(f"{row['scan_ora_italiana']} {row['ruolo_scansione']}: "
+                  f"livello={row.get('livello')}, {row.get('motivo')}, "
+                  f"notifica={row.get('notifica_inviata')}")
+        if args.dry_run:
+            print(f"SOLO SIMULAZIONE: {len(sent)} avvisi non inviati, "
+                  f"salvataggio={should_save}, episodio_attivo={next_state['active']}")
+            for text in sent:
+                print("---\n" + text)
+            write_log(args, rows, run_dt)
+            return
         if should_save:
             stage = "salvataggio_stato"
             persist_state(github_token, next_state, sha)
             print("Stato radar salvato nel repository")
         else:
             print("Nessuna nuova notifica e nessun aggiornamento dello stato")
-        base["esito"] = "ok"
-        write_log(args, build_rows(base, scans, run_dt), run_dt)
+        write_log(args, rows, run_dt)
     except Exception as error:
-        base.update(esito=f"errore_{stage}", dettaglio=type(error).__name__)
-        write_log(args, build_rows(base, scans, run_dt), run_dt)
+        if not rows or not str(rows[-1].get("esito", "")).startswith("errore"):
+            rows = rows + [dict(base, esito=f"errore_{stage}",
+                                dettaglio=f"{base['dettaglio']}; {type(error).__name__}")]
+        write_log(args, rows, run_dt)
         raise
 
 

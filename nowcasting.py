@@ -64,26 +64,36 @@ def evaluate(a,b):
     if near(a) and near(b): return 1,"pioggia entro 5 km"
     return 0,"sotto soglia"
 
-def get_scans():
+def new_session():
     s=requests.Session(); s.headers.update(HEADERS)
+    return s
+
+def last_product_time(s):
+    """Ora (ms UTC) dell'ultima scansione SRI pubblicata, con controllo di freschezza."""
     r=s.get(API+"/findLastProductByType",params={"type":"SRI"},timeout=20);r.raise_for_status()
     items=r.json().get("lastProducts") or []
     if not items or items[0].get("productType")!="SRI": raise ValueError("SRI non disponibile")
     t=int(items[0]["time"])
     now=int(datetime.now(timezone.utc).timestamp()*1000)
     if not (-120_000 <= now-t <= 25*60_000):raise ValueError("Scansione obsoleta o futura")
-    result=[]
-    for ts in (t-STEP,t):
-        r=s.post(API+"/downloadProduct",json={"productType":"SRI","productDate":ts},timeout=20)
-        r.raise_for_status();url=r.json().get("url","")
-        from urllib.parse import urlsplit
-        u=urlsplit(url)
-        if u.scheme!="https" or not (u.hostname or "").endswith(".s3.eu-south-1.amazonaws.com"):
-            raise ValueError("Host di download non autorizzato")
-        rr=s.get(url,timeout=45);rr.raise_for_status()
-        if not (1024<=len(rr.content)<=50_000_000):raise ValueError("Dimensione raster inattesa")
-        result.append(observe(rr.content,ts))
-    return result
+    return t
+
+def download_scan(s, ts):
+    """Scarica e analizza la scansione SRI dell'ora ts (ms UTC)."""
+    from urllib.parse import urlsplit
+    r=s.post(API+"/downloadProduct",json={"productType":"SRI","productDate":ts},timeout=20)
+    r.raise_for_status();url=r.json().get("url","")
+    u=urlsplit(url)
+    if u.scheme!="https" or not (u.hostname or "").endswith(".s3.eu-south-1.amazonaws.com"):
+        raise ValueError("Host di download non autorizzato")
+    rr=s.get(url,timeout=45);rr.raise_for_status()
+    if not (1024<=len(rr.content)<=50_000_000):raise ValueError("Dimensione raster inattesa")
+    return observe(rr.content,ts)
+
+def get_scans():
+    s=new_session()
+    t=last_product_time(s)
+    return [download_scan(s,ts) for ts in (t-STEP,t)]
 
 def message(o, level,reason):
     t=datetime.fromtimestamp(o["when"]/1000,ITALY).strftime("%d/%m/%Y %H:%M %Z")

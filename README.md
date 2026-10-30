@@ -4,7 +4,7 @@ Progetto sperimentale per osservare le precipitazioni stimate dal radar della Pr
 
 ## Stato: monitoraggio programmato sperimentale
 
-**Workflow di sorveglianza configurato ogni 10 minuti**, con orari UTC ai minuti 09, 19, 29, 39, 49 e 59. La reale puntualità dipende da GitHub Actions e dalla disponibilità dei dati DPC. Il primo ciclo del workflow programmato deve ancora essere verificato nei log.
+**Avvio regolare ogni 10 minuti da Google Apps Script** (evento `workflow_dispatch`, script in `apps_script/RadarDispatch.gs`), perché la pianificazione cron di GitHub nella pratica parte con 20-60 minuti di ritardo. Il cron del workflow (minuti 09, 19, 29, 39, 49 e 59 UTC) resta come riserva. Ogni esecuzione elabora tutte le scansioni SRI pubblicate dopo l'ultima già elaborata (fino a 12, cioè 60 minuti), quindi un'esecuzione saltata o in ritardo non fa perdere scansioni e le esecuzioni doppie non producono avvisi doppi. Lo stesso script controlla una volta l'ora che il workflow sia attivo e abbia girato di recente, e in caso contrario avvisa su Telegram.
 
 Il workflow di sorveglianza si trova in `.github/workflows/radar-watch.yml`: legge due scansioni SRI, invia messaggi **solo se** trova un episodio che raggiunge le soglie sperimentali e aggiorna lo stato dell'episodio in `state/stato_avvisi.json`. Il registro di stato è pubblico (timestamp e livelli, non segreti). Gli altri workflow servono per i test:
 
@@ -41,7 +41,7 @@ In GitHub apri **Actions**, seleziona il workflow da collaudare, poi **Run workf
 - Il radar SRI ha una latenza variabile rispetto alla scansione osservata: non è garantito un anticipo sull'inizio della pioggia.
 - Gli avvisi indicano **pioggia stimata nelle vicinanze**, non necessariamente precipitazioni in arrivo sulla PGL320, né presenza di fulmini.
 - Le soglie sono sperimentali e possono produrre falsi avvisi o mancare eventi; non sostituiscono le allerte ufficiali.
-- In caso di perdita di connettività o dati radar scaduti il job segnala un errore nei log, ma non invia automaticamente un messaggio di guasto su Telegram.
+- In caso di perdita di connettività o dati radar scaduti il job segnala un errore nei log e nel registro `registro/AAAA/AAAA-MM-GG.csv`; il messaggio di guasto su Telegram arriva dallo script Apps Script di sorveglianza, se configurato.
 - I workflow pianificati dei repository pubblici GitHub sono disattivati automaticamente dopo 60 giorni senza attività del repository; verificare periodicamente il pannello Actions.
 - I runner standard nei repository pubblici sono gratuiti secondo la documentazione GitHub; possibili vincoli diversi per runner a pagamento, storage o altre risorse.
 - Per disattivare: aprire **Actions → PGL320 - sorveglianza radar automatica → Disable workflow**.
