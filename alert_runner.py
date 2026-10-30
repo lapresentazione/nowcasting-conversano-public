@@ -22,6 +22,19 @@ Versione 3 (esecuzioni regolari e recupero, 30/10/2026):
   "intermedia"); se non c'è nulla di nuovo, una riga "gia_elaborata" con
   esito "nessuna_novita" (segnale di vita). La colonna dettaglio riporta il
   tipo di avvio (evento=schedule / workflow_dispatch).
+
+Versione 4 (moto delle celle, avvicinamento e mappa, 30/10/2026):
+- se c'è pioggia entro 60 km, stima il moto delle celle sulle scansioni degli
+  ultimi 30 minuti (movimento.py) e invia un avviso di AVVICINAMENTO quando una
+  cella di almeno 0,5 mm/h e 4 km² è stimata in arrivo entro 5-60 minuti con
+  almeno due terzi delle stime concordi; un solo avviso per episodio (vedi
+  approach_allowed); nessun avviso di avvicinamento durante un episodio L1/L2;
+- a ogni avviso (avvicinamento, L1, L2) allega una mappa di +-50 km (mappa.py);
+  se la mappa o l'invio della foto falliscono, invia il solo testo;
+- registra nel campo dettaglio della riga "ultima" il moto stimato e la cella in
+  avvicinamento, per le verifiche successive;
+- stato: nuovo campo facoltativo "approach_scan" (ora della scansione dell'ultimo
+  avviso di avvicinamento); gli altri campi non cambiano.
 """
 import argparse
 import base64
@@ -34,7 +47,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 import requests
-from nowcasting import (new_session, last_product_time, download_scan,
+from nowcasting import (new_session, last_product_time, download_raw, observe,
                         evaluate, message, ITALY, STEP)
 
 FILE_PATH = "state/stato_avvisi.json"
@@ -45,6 +58,12 @@ MAX_NEW_SCANS = int(os.environ.get("RADAR_MAX_SCANS", "12"))
 # Oltre questo ritardo il messaggio dichiara che l'avviso arriva in recupero.
 LATE_NOTE_MIN = 20
 MISSING = "scansione mancante"
+# Avviso di avvicinamento: un nuovo avviso è ammesso se dal precedente c'è stato un
+# avviso L1/L2 (l'episodio annunciato si è concretizzato) oppure se sono passati
+# almeno APPROACH_COOLDOWN_MS (l'annuncio precedente non si è concretizzato).
+APPROACH_COOLDOWN_MS = 120 * 60_000
+MOTION_FRAMES = 7  # scansioni a 5 minuti usate per il moto (30 minuti)
+RADAR_LINK = "https://mappe.protezionecivile.gov.it/it/mappe-rischi/piattaforma-radar/"
 INSUFFICIENT = ("scansioni non consecutive", "copertura o cella locale insufficiente",
                 "scansione mancante")
 DEFAULT = {
@@ -230,7 +249,7 @@ def process_scans(state, obs_by_time, new_times, run_dt, base, send):
 
     obs_by_time: ora -> osservazione (None se il download non è riuscito);
     deve contenere anche la scansione che precede la prima nuova.
-    send(testo) invia un avviso. Restituisce (stato, salvataggio?, righe).
+    send(testo, ora_scansione) invia un avviso. Restituisce (stato, salvataggio?, righe).
     Se un invio fallisce solleva PartialFailure con lo stato consolidato
     prima di quella scansione, così gli avvisi già partiti non si ripetono.
     """
@@ -258,7 +277,7 @@ def process_scans(state, obs_by_time, new_times, run_dt, base, send):
         next_state, alert, step_save = decide(state, level, when)
         if alert:
             try:
-                send(late_note(message(cur, level, reason), when, run_dt))
+                send(late_note(message(cur, level, reason), when, run_dt), when)
             except Exception as error:
                 row.update(esito="errore_telegram",
                            dettaglio=f"{base.get('dettaglio', '')}; {type(error).__name__}")
@@ -397,23 +416,185 @@ def send_telegram(text):
 
 # --------------------------------------------------------------------- main
 
+# ------------------------------------------------- moto, avvicinamento, mappa
+
+def approach_allowed(state, scan_time):
+    """Un solo avviso di avvicinamento per episodio.
+
+    Mai durante un episodio L1/L2 attivo. Ammesso se non ce ne sono stati, se dopo
+    l'ultimo c'è stato un avviso L1/L2, o se sono passati APPROACH_COOLDOWN_MS.
+    """
+    if state.get("active"):
+        return False
+    last = int(state.get("approach_scan", 0))
+    if last <= 0:
+        return True
+    if int(state.get("last_alert_scan", 0)) > last:
+        return True
+    return scan_time - last > APPROACH_COOLDOWN_MS
+
+
+def approach_message(cella, moto, when, run_dt):
+    import movimento as mv
+    t = datetime.fromtimestamp(when / 1000, ITALY).strftime("%d/%m/%Y %H:%M %Z")
+    lo, hi = cella["arrivo_range_min"]
+    n = len(moto["vettori_kmh"])
+    concordi = round(cella["quota_concordi"] * n)
+    testo = (f"Radar Conversano: pioggia in avvicinamento\n"
+             f"Cella a {cella['dist_km']:.0f} km a {mv.punto_cardinale(cella['direzione_gradi'])}, "
+             f"massimo {cella['max_mm_h']:.1f} mm/h, {mv.descrivi_moto(moto)}.\n"
+             f"Arrivo stimato fra circa {cella['arrivo_min']:.0f} min "
+             f"(intervallo {lo:.0f}-{hi:.0f} min); {concordi} stime su {n} la danno in arrivo.\n"
+             f"Scansione: {t}\n"
+             "Stima sperimentale: la cella può cambiare direzione, intensificarsi o dissolversi. "
+             "Avviso non ufficiale.\n"
+             f"Radar Protezione Civile: {RADAR_LINK}")
+    return late_note(testo, when, run_dt)
+
+
+class RadarContext:
+    """Scansioni grezze della corsa, ritagli, moto e mappe (tutto best effort)."""
+
+    def __init__(self, session, raws):
+        self.session, self.raws = session, raws
+        self.crops, self.motions = {}, {}
+
+    def crop(self, when):
+        if when not in self.crops:
+            import movimento as mv
+            raw = self.raws.get(when)
+            self.crops[when] = None if raw is None else mv.ritaglia(raw)
+        return self.crops[when]
+
+    def rain_nearby(self, when):
+        import movimento as mv
+        c = self.crop(when)
+        return bool(c) and bool(mv.celle(c[0], c[1], c[2], None))
+
+    def fetch_motion_frames(self, latest):
+        """Scarica le scansioni degli ultimi 30 minuti che mancano (best effort)."""
+        for k in range(1, MOTION_FRAMES):
+            when = latest - k * STEP
+            if when not in self.raws:
+                try:
+                    self.raws[when] = download_raw(self.session, when)
+                except Exception:
+                    self.raws[when] = None
+
+    def motion(self, when):
+        if when not in self.motions:
+            import movimento as mv
+            frames = []
+            for k in range(MOTION_FRAMES - 1, -1, -1):
+                c = self.crop(when - k * STEP) if (when - k * STEP) in self.raws else None
+                frames.append(None if c is None else c[0])
+            self.motions[when] = mv.stima_moto(frames)
+        return self.motions[when]
+
+    def analysis(self, when):
+        """(ritaglio, moto, celle) per la scansione when; None se manca il ritaglio."""
+        import movimento as mv
+        c = self.crop(when)
+        if c is None:
+            return None
+        moto = self.motion(when)
+        return c, moto, mv.celle(c[0], c[1], c[2], moto)
+
+    def map_png(self, when, titolo):
+        import mappa
+        a = self.analysis(when)
+        if a is None:
+            return None, None
+        (campo, r, cc, geo), moto, cl = a
+        ora = datetime.fromtimestamp(when / 1000, ITALY).strftime("%d/%m/%Y %H:%M")
+        import movimento as mv
+        full = f"{titolo} – scansione {ora}\npioggia {mv.descrivi_moto(moto)}"
+        return mappa.disegna(campo, r, cc, geo, full, moto, cl), moto
+
+
+def make_sender(ctx, text_sender, photo_sender, log=print):
+    """send(testo, ora): allega la mappa e il moto; ripiega sul solo testo."""
+    def send(text, when):
+        png = None
+        try:
+            png, moto = ctx.map_png(when, "Radar Conversano PGL320")
+            if moto and "Cella a " not in text:  # l'avviso di avvicinamento ha già il moto
+                import movimento as mv
+                text = text.replace("\nScansione:", f"\nPioggia {mv.descrivi_moto(moto)}.\nScansione:", 1)
+        except Exception as error:
+            log(f"Mappa non prodotta: {type(error).__name__}")
+            png = None
+        if png:
+            try:
+                photo_sender(png, text)
+                return
+            except Exception as error:
+                log(f"Foto non inviata ({type(error).__name__}): invio il solo testo")
+        text_sender(text)
+    return send
+
+
+def send_telegram_photo(png, caption):
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat:
+        raise RuntimeError("Credenziali Telegram assenti")
+    resp = requests.post(
+        f"https://api.telegram.org/bot{token}/sendPhoto",
+        data={"chat_id": chat, "caption": caption[:1024]},
+        files={"photo": ("radar.png", png, "image/png")},
+        timeout=30,
+    )
+    if resp.status_code != 200 or not resp.json().get("ok"):
+        raise RuntimeError(f"Telegram non conferma la foto (HTTP {resp.status_code})")
+
+
+def evaluate_approach(ctx, state, latest, run_dt, send_approach):
+    """Valuta e, se del caso, invia l'avviso di avvicinamento.
+
+    Restituisce (stato aggiornato, salvataggio?, testo per il registro).
+    """
+    import movimento as mv
+    a = ctx.analysis(latest)
+    if a is None:
+        return state, False, "moto=scansione non disponibile"
+    _, moto, cl = a
+    info = f"moto={mv.descrivi_moto(moto)}"
+    if moto:
+        info += f" (dispersione {moto['dispersione_kmh']:.0f} km/h, {len(moto['vettori_kmh'])} vettori)"
+    cella = mv.cella_in_avvicinamento(cl)
+    if cella is None:
+        return state, False, info
+    lo, hi = cella["arrivo_range_min"]
+    info += (f"; avvicinamento={cella['arrivo_min']:.0f} min ({lo:.0f}-{hi:.0f}), "
+             f"{cella['dist_km']:.0f} km {mv.punto_cardinale(cella['direzione_gradi'])}, "
+             f"{cella['max_mm_h']:.1f} mm/h, concordi {cella['quota_concordi']:.2f}")
+    if not approach_allowed(state, latest):
+        return state, False, info + "; avviso_avvicinamento=0 (già inviato o episodio in corso)"
+    send_approach(approach_message(cella, moto, latest, run_dt), latest)
+    new_state = dict(state, approach_scan=latest)
+    return new_state, True, info + "; avviso_avvicinamento=1"
+
+
 def fetch_observations(session, new_times):
     """Scarica le scansioni nuove e quella che precede la prima.
 
-    Un download non riuscito vale None (coppia insufficiente), tranne per la
-    scansione più recente: in quel caso l'errore si propaga.
+    Restituisce (osservazioni, file grezzi, orari mancanti). Un download non
+    riuscito vale None (coppia insufficiente), tranne per la scansione più
+    recente: in quel caso l'errore si propaga.
     """
-    obs, missing = {}, []
+    obs, raws, missing = {}, {}, []
     wanted = [new_times[0] - STEP] + list(new_times)
     for when in wanted:
         try:
-            obs[when] = download_scan(session, when)
+            raws[when] = download_raw(session, when)
+            obs[when] = observe(raws[when], when)
         except Exception:
             if when == new_times[-1]:
                 raise
-            obs[when] = None
+            obs[when], raws[when] = None, None
             missing.append(datetime.fromtimestamp(when / 1000, ITALY).strftime("%H:%M"))
-    return obs, missing
+    return obs, raws, missing
 
 
 def main():
@@ -467,17 +648,39 @@ def main():
             return
 
         stage = "radar"
-        obs, missing = fetch_observations(session, new_times)
+        obs, raws, missing = fetch_observations(session, new_times)
         base["dettaglio"] += f"; nuove={len(new_times)}"
         if missing:
             base["dettaglio"] += "; mancanti=" + ",".join(missing)
 
+        stage = "moto"
+        ctx = RadarContext(session, raws)
+        latest = new_times[-1]
+        motion_note = ""
+        try:
+            if ctx.rain_nearby(latest):
+                ctx.fetch_motion_frames(latest)
+        except Exception as error:
+            motion_note = f"moto=errore {type(error).__name__}"
+
         stage = "elaborazione"
         if args.dry_run:
             sent = []
-            send = sent.append
+            save_dir = os.environ.get("RADAR_SALVA_MAPPE", "")
+
+            def dry_text(text):
+                sent.append(text)
+
+            def dry_photo(png, text):
+                sent.append(text)
+                if save_dir:
+                    path = os.path.join(save_dir, f"mappa_{len(sent)}.png")
+                    with open(path, "wb") as fh:
+                        fh.write(png)
+                    print(f"Mappa salvata: {path}")
+            send = make_sender(ctx, dry_text, dry_photo)
         else:
-            send = send_telegram
+            send = make_sender(ctx, send_telegram, send_telegram_photo)
         try:
             next_state, should_save, rows = process_scans(
                 state, obs, new_times, run_dt, base, send)
@@ -488,6 +691,17 @@ def main():
                 print("Stato consolidato salvato prima dell'errore")
             stage = failure.stage
             raise failure.error
+
+        # Avviso di avvicinamento sull'ultima scansione (non blocca mai L1/L2).
+        if not motion_note:
+            try:
+                next_state, approach_save, motion_note = evaluate_approach(
+                    ctx, next_state, latest, run_dt, send)
+                should_save = should_save or approach_save
+            except Exception as error:
+                motion_note = f"moto=errore {type(error).__name__}"
+        if rows and rows[-1].get("ruolo_scansione") == "ultima" and motion_note:
+            rows[-1]["dettaglio"] = f"{rows[-1].get('dettaglio', '')}; {motion_note}"
 
         for row in rows:
             print(f"{row['scan_ora_italiana']} {row['ruolo_scansione']}: "

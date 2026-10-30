@@ -189,7 +189,7 @@ class ProcessTest(unittest.TestCase):
              times[3]: wet_obs(times[3], ge1_5=3, ge5_10=4, ge10_10=1)}
         sent = []
         st, save, rows = process_scans(dict(DEFAULT), o, times,
-                                       run_dt_after(times[-1]), self.BASE, sent.append)
+                                       run_dt_after(times[-1]), self.BASE, lambda t, w: sent.append(t))
         self.assertEqual(len(sent), 2)
         self.assertTrue(save)
         self.assertEqual(st["level"], 2)
@@ -204,7 +204,7 @@ class ProcessTest(unittest.TestCase):
         o = {t: fake_obs(t) for t in [T0] + times}
         sent = []
         st, save, rows = process_scans(dict(DEFAULT), o, times,
-                                       run_dt_after(times[-1]), self.BASE, sent.append)
+                                       run_dt_after(times[-1]), self.BASE, lambda t, w: sent.append(t))
         self.assertEqual(sent, [])
         self.assertFalse(save)
         self.assertEqual(st, DEFAULT)
@@ -216,7 +216,7 @@ class ProcessTest(unittest.TestCase):
              times[1]: wet_obs(times[1], ge1_5=3), times[2]: wet_obs(times[2], ge1_5=3)}
         sent = []
         st, save, rows = process_scans(dict(DEFAULT), o, times,
-                                       run_dt_after(times[-1]), self.BASE, sent.append)
+                                       run_dt_after(times[-1]), self.BASE, lambda t, w: sent.append(t))
         self.assertEqual([r["esito"] for r in rows],
                          ["dati_insufficienti", "dati_insufficienti", "ok"])
         self.assertEqual(rows[0]["motivo"], "scansione mancante")
@@ -230,12 +230,12 @@ class ProcessTest(unittest.TestCase):
         o1 = {T0: wet_obs(T0, ge1_5=3), t1[0]: wet_obs(t1[0], ge1_5=3)}
         sent = []
         st, _, _ = process_scans(dict(DEFAULT), o1, t1, run_dt_after(t1[0]),
-                                 self.BASE, sent.append)
+                                 self.BASE, lambda t, w: sent.append(t))
         # Seconda esecuzione, 25 minuti dopo, con pioggia continua: nessun nuovo avviso.
         t2 = [T0 + k * STEP for k in range(2, 7)]
         o2 = {t: wet_obs(t, ge1_5=3) for t in [t1[0]] + t2}
         st, save, rows = process_scans(st, o2, t2, run_dt_after(t2[-1]),
-                                       self.BASE, sent.append)
+                                       self.BASE, lambda t, w: sent.append(t))
         self.assertEqual(len(sent), 1)
         self.assertTrue(save)
         self.assertEqual(st["last_scan"], t2[-1])
@@ -248,7 +248,7 @@ class ProcessTest(unittest.TestCase):
              times[2]: wet_obs(times[2], ge1_5=3, ge5_10=4, ge10_10=1)}
         calls = []
 
-        def flaky(text):
+        def flaky(text, when=None):
             calls.append(text)
             if len(calls) == 2:
                 raise RuntimeError("rete")
@@ -296,3 +296,160 @@ class LogReadTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ------------------------------------------------- moto, avvicinamento, mappa
+import numpy as np
+import movimento as mv
+from alert_runner import (approach_allowed, evaluate_approach, make_sender,
+                          RadarContext, APPROACH_COOLDOWN_MS)
+
+FIXTURE = "test_sri_2026-10-30_2220-2250.npz"  # scansioni reali 22:20-22:50 del 30/10/2026
+
+
+def fixture():
+    z = np.load(FIXTURE)
+    campi = [a.astype(float) for a in z["campi"]]
+    from rasterio.crs import CRS
+    from affine import Affine
+    geo = (CRS.from_wkt(str(z["crs_wkt"])), Affine(*z["transform"]), int(z["r0"]), int(z["c0"]))
+    return campi, [int(t) for t in z["tempi"]], int(z["r_st"]), int(z["c_st"]), geo
+
+
+def ctx_from_fixture(upto=None):
+    campi, tempi, r, c, geo = fixture()
+    n = len(campi) if upto is None else upto
+    ctx = RadarContext(None, {t: b"" for t in tempi[:n]})
+    ctx.crops = {t: (a, r, c, geo) for t, a in zip(tempi[:n], campi[:n])}
+    return ctx, tempi[n - 1]
+
+
+class MotoTest(unittest.TestCase):
+    def test_synthetic_shift(self):
+        from scipy import ndimage
+        rng = np.random.default_rng(1)
+        base = ndimage.gaussian_filter(rng.random((241, 241)), 6)
+        base = np.where(base > np.quantile(base, .8), (base - base.min()) * 80, 0)
+        moved = np.roll(np.roll(base, 3, axis=1), -2, axis=0)   # 3 km a est, 2 a nord
+        dx, dy = mv.spostamento(base, moved)
+        self.assertAlmostEqual(dx, 3, delta=0.2)
+        self.assertAlmostEqual(dy, 2, delta=0.2)
+
+    def test_no_rain_no_motion(self):
+        z = np.zeros((241, 241))
+        self.assertIsNone(mv.stima_moto([z] * 7))
+
+    def test_real_motion_30_oct(self):
+        campi, _, _, _, _ = fixture()
+        m = mv.stima_moto(campi)
+        self.assertEqual(len(m["vettori_kmh"]), 5)
+        self.assertAlmostEqual(m["est_kmh"], -10.8, delta=1.5)    # verso ovest
+        self.assertAlmostEqual(m["nord_kmh"], -1.4, delta=1.5)
+        self.assertLess(m["dispersione_kmh"], 6)
+        self.assertEqual(mv.punto_cardinale(m["provenienza_gradi"]), "est")
+
+    def test_missing_frames_tolerated(self):
+        campi, _, _, _, _ = fixture()
+        campi[3] = None
+        m = mv.stima_moto(campi)
+        self.assertEqual(len(m["vettori_kmh"]), 3)
+
+    def test_real_cell_ne_not_concordant_at_2250(self):
+        campi, _, r, c, _ = fixture()
+        m = mv.stima_moto(campi)
+        cl = mv.celle(campi[-1], r, c, m)
+        ne = cl[0]
+        self.assertEqual(mv.punto_cardinale(ne["direzione_gradi"]), "nord-est")
+        self.assertTrue(40 <= ne["arrivo_min"] <= 90)     # 22:50: arrivo stimato ~61 min
+        self.assertLess(ne["quota_concordi"], 2 / 3)      # solo 3 vettori su 5 concordi
+        self.assertIsNone(mv.cella_in_avvicinamento(cl))  # quindi nessun avviso
+
+    def test_eta_is_entry_into_5_km_circle(self):
+        # cella puntiforme 20 km a est che va verso ovest a 30 km/h sulla stazione:
+        # entra nel cerchio di 5 km dopo 15 km, cioè 30 minuti
+        est = np.array([20.0]); nord = np.array([0.0])
+        self.assertAlmostEqual(mv._arrivo(est, nord, 20.0, -30.0, 0.0), 30.0, places=6)
+
+    def test_approach_rule_thresholds(self):
+        base = {"arrivo_min": 30.0, "arrivo_range_min": (25, 40), "quota_concordi": 0.8}
+        self.assertIsNotNone(mv.cella_in_avvicinamento([base]))
+        self.assertIsNone(mv.cella_in_avvicinamento([dict(base, arrivo_min=61.0)]))
+        self.assertIsNone(mv.cella_in_avvicinamento([dict(base, arrivo_min=3.0)]))
+        self.assertIsNone(mv.cella_in_avvicinamento([dict(base, quota_concordi=0.6)]))
+
+
+class AvvicinamentoTest(unittest.TestCase):
+    def test_allowed_rules(self):
+        s = dict(DEFAULT)
+        self.assertTrue(approach_allowed(s, T0))
+        self.assertFalse(approach_allowed(dict(s, active=True), T0))
+        s2 = dict(s, approach_scan=T0)
+        self.assertFalse(approach_allowed(s2, T0 + 60 * 60_000))
+        self.assertTrue(approach_allowed(s2, T0 + APPROACH_COOLDOWN_MS + STEP))
+        self.assertTrue(approach_allowed(dict(s2, last_alert_scan=T0 + STEP), T0 + 2 * STEP))
+
+    def test_evaluate_sends_once(self):
+        ctx, latest = ctx_from_fixture()
+        sent = []
+        cella = {"arrivo_min": 30.0, "arrivo_range_min": (25.0, 40.0), "quota_concordi": 0.8,
+                 "dist_km": 9.0, "direzione_gradi": 45.0, "max_mm_h": 3.2, "area_km2": 20,
+                 "punto_km": (6.0, 6.0)}
+        orig = mv.cella_in_avvicinamento
+        mv.cella_in_avvicinamento = lambda cl: cella
+        try:
+            st, save, info = evaluate_approach(ctx, dict(DEFAULT), latest, run_dt_after(latest),
+                                               lambda t, w: sent.append(t))
+            self.assertTrue(save)
+            self.assertEqual(st["approach_scan"], latest)
+            self.assertIn("avviso_avvicinamento=1", info)
+            self.assertIn("pioggia in avvicinamento", sent[0])
+            self.assertIn("Arrivo stimato fra circa 30 min", sent[0])
+            st2, save2, info2 = evaluate_approach(ctx, st, latest, run_dt_after(latest),
+                                                  lambda t, w: sent.append(t))
+            self.assertFalse(save2)
+            self.assertEqual(len(sent), 1)
+            self.assertIn("avviso_avvicinamento=0", info2)
+        finally:
+            mv.cella_in_avvicinamento = orig
+
+    def test_real_case_no_approach_at_2250(self):
+        ctx, latest = ctx_from_fixture()
+        sent = []
+        st, save, info = evaluate_approach(ctx, dict(DEFAULT), latest, run_dt_after(latest),
+                                           lambda t, w: sent.append(t))
+        self.assertEqual(sent, [])
+        self.assertFalse(save)
+        self.assertIn("in moto da est", info)
+
+
+class MappaInvioTest(unittest.TestCase):
+    def test_map_png_real(self):
+        ctx, latest = ctx_from_fixture()
+        png, moto = ctx.map_png(latest, "Prova")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        self.assertIsNotNone(moto)
+
+    def test_sender_photo_with_motion(self):
+        ctx, latest = ctx_from_fixture()
+        photos, texts = [], []
+        send = make_sender(ctx, texts.append, lambda png, t: photos.append(t), log=lambda m: None)
+        send("Radar Conversano: pioggia entro 5 km\nScansione: x\nAltro", latest)
+        self.assertEqual(texts, [])
+        self.assertIn("Pioggia in moto da est", photos[0])
+
+    def test_sender_falls_back_to_text(self):
+        ctx, latest = ctx_from_fixture()
+        texts = []
+
+        def broken(png, text):
+            raise RuntimeError("rete")
+        send = make_sender(ctx, texts.append, broken, log=lambda m: None)
+        send("Radar Conversano: pioggia entro 5 km\nScansione: x", latest)
+        self.assertEqual(len(texts), 1)
+
+    def test_sender_without_scan_sends_text(self):
+        ctx = RadarContext(None, {})
+        texts = []
+        send = make_sender(ctx, texts.append, lambda p, t: None, log=lambda m: None)
+        send("testo", T0)
+        self.assertEqual(texts, ["testo"])

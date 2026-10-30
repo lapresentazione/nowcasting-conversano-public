@@ -80,6 +80,10 @@ def last_product_time(s):
 
 def download_scan(s, ts):
     """Scarica e analizza la scansione SRI dell'ora ts (ms UTC)."""
+    return observe(download_raw(s, ts), ts)
+
+def download_raw(s, ts):
+    """Scarica il file GeoTIFF grezzo della scansione SRI dell'ora ts (ms UTC)."""
     from urllib.parse import urlsplit
     r=s.post(API+"/downloadProduct",json={"productType":"SRI","productDate":ts},timeout=20)
     r.raise_for_status();url=r.json().get("url","")
@@ -88,7 +92,7 @@ def download_scan(s, ts):
         raise ValueError("Host di download non autorizzato")
     rr=s.get(url,timeout=45);rr.raise_for_status()
     if not (1024<=len(rr.content)<=50_000_000):raise ValueError("Dimensione raster inattesa")
-    return observe(rr.content,ts)
+    return rr.content
 
 def get_scans():
     s=new_session()
@@ -103,8 +107,8 @@ def message(o, level,reason):
     return (f"Radar Conversano: {reason}\nScansione: {t}\n"
             f"Massimo entro {r} km: {s['max_mm_h']:.2f} mm/h. "
             f"Stima cella PGL320: {point}.\n"
-            "Precipitazione stimata, non misura al suolo. Non implica un temporale "
-            "né consente di prevedere il movimento. Avviso sperimentale non ufficiale.\n"
+            "Precipitazione stimata, non misura al suolo. Non implica un temporale. "
+            "Avviso sperimentale non ufficiale.\n"
             "Radar Protezione Civile: https://mappe.protezionecivile.gov.it/it/mappe-rischi/piattaforma-radar/")
 
 def main():
