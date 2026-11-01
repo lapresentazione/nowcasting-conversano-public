@@ -259,6 +259,21 @@ class SenderTest(unittest.TestCase):
         self.assertIsNone(ctx.lampi)
         self.assertIn("dati non disponibili (chiavi EUMETSAT assenti)", foto[0])
 
+    def test_frase_temporale_tolta_solo_con_lampi(self):
+        for lampi, attesa in (([(3, 25, 90)], False), ([], True), ([(3, 45, 90)], True)):
+            foto = []
+            send = make_sender(FakeCtx(), foto.append, lambda p, t: foto.append(t), log=lambda m: None,
+                               att=att_sintetica(lampi))
+            send(self.RADAR, 0)
+            self.assertEqual("Non implica un temporale" in foto[0], attesa)
+            self.assertIn("Precipitazione stimata, non misura al suolo. Avviso sperimentale", foto[0]
+                          if not attesa else "Precipitazione stimata, non misura al suolo. Avviso sperimentale")
+        foto = []
+        send = make_sender(FakeCtx(), foto.append, lambda p, t: foto.append(t), log=lambda m: None,
+                           att=fl.Attivita.non_disponibile("tempo scaduto"))
+        send(self.RADAR, 0)
+        self.assertIn("Non implica un temporale", foto[0])
+
     def test_stato_cambiato(self):
         self.assertFalse(lightning_changed({}, dict(fl.STATO_INIZIALE)))
         self.assertTrue(lightning_changed({}, dict(fl.STATO_INIZIALE, lightning_active=True)))

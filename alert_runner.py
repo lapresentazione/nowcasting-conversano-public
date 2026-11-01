@@ -48,7 +48,9 @@ Versione 5 (attività elettrica dal satellite, 01/11/2026, scelte di Michele):
 - stato: campi facoltativi lightning_active, lightning_last_inside, lightning_alert;
 - registro: nella colonna dettaglio della riga "ultima" (o "gia_elaborata") il
   riepilogo dei lampi e avviso_fulmini=0/1;
-- senza dati satellitari (chiavi assenti, errore, ritardo) il radar lavora come prima.
+- senza dati satellitari (chiavi assenti, errore, ritardo) il radar lavora come prima;
+- con lampi entro 40 km negli ultimi 20 minuti il messaggio radar non riporta più la
+  frase "Non implica un temporale" (01/11/2026).
 """
 import argparse
 import base64
@@ -528,6 +530,7 @@ class RadarContext:
 
 
 CAPTION_MAX = 1024  # limite Telegram per la didascalia di una foto
+FRASE_NO_TEMPORALE = "Non implica un temporale. "  # vedi nowcasting.message()
 
 
 def is_lightning_alert(text):
@@ -549,6 +552,10 @@ def make_sender(ctx, text_sender, photo_sender, log=print, att=None, avviso=None
                 unito = True
             else:
                 text = text.replace("\nScansione:", f"\n{att.riga()}\nScansione:", 1)
+        # Con lampi entro 40 km la frase del radar "Non implica un temporale" non vale più
+        # (scelta di Michele, 01/11/2026).
+        if att is not None and att.disponibile and att.conta(fl.RAGGIO_RIGA_KM) > 0:
+            text = text.replace(FRASE_NO_TEMPORALE, "")
         lampi = att.per_mappa() if att is not None and att.disponibile else None
         png = None
         try:
