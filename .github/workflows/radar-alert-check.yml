@@ -7,6 +7,9 @@ on:
     paths:
       - 'nowcasting.py'
       - 'alert_runner.py'
+      - 'fulmini.py'
+      - 'mappa.py'
+      - 'test_fulmini.py'
       - 'test_alert_runner.py'
       - 'metar_watch.py'
       - 'test_metar_watch.py'
@@ -30,11 +33,15 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Verifica blocco duplicati e gestione episodi
         run: python -m unittest -v test_alert_runner.py
+      - name: Verifica attività elettrica da satellite (regola A, messaggi, mappa)
+        run: python -m unittest -v test_fulmini.py
       - name: Verifica regole temporali METAR
         run: python -m unittest -v test_metar_watch.py
-      - name: Valuta radar e stato in simulazione, senza inviare avvisi
+      - name: Valuta radar, lampi e stato in simulazione, senza inviare avvisi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EUMETSAT_CONSUMER_KEY: ${{ secrets.EUMETSAT_CONSUMER_KEY }}
+          EUMETSAT_CONSUMER_SECRET: ${{ secrets.EUMETSAT_CONSUMER_SECRET }}
         run: python alert_runner.py --dry-run
       - name: Valuta METAR in simulazione, senza inviare avvisi
         if: always()

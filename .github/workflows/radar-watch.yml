@@ -19,7 +19,7 @@ jobs:
   sorveglianza:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Scarica codice verificato
         uses: actions/checkout@v6
@@ -46,6 +46,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Lampi dal satellite (fulmini.py); se mancano, il radar lavora come prima.
+          EUMETSAT_CONSUMER_KEY: ${{ secrets.EUMETSAT_CONSUMER_KEY }}
+          EUMETSAT_CONSUMER_SECRET: ${{ secrets.EUMETSAT_CONSUMER_SECRET }}
         run: python alert_runner.py --notify
 
       - name: Controlla temporali METAR Gioia del Colle e Bari e notifica nuovi episodi
