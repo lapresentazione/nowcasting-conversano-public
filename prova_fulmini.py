@@ -3,9 +3,12 @@
 Non invia messaggi e non tocca stato o registro del sistema radar.
 Richiede i segreti EUMETSAT_CONSUMER_KEY e EUMETSAT_CONSUMER_SECRET (mai stampati).
 
+Intervallo: di default l'ultima ora e mezza; con le variabili DAL e AL (ora italiana,
+"AAAA-MM-GG HH:MM", al massimo 6 ore) si rilegge un periodo passato dall'archivio.
+
 Cosa stampa:
 1. se l'autenticazione funziona;
-2. i pacchetti LI-2-LFL (flash, disco intero, 10 minuti) dell'ultima ora e mezza,
+2. i pacchetti LI-2-LFL (flash, disco intero, 10 minuti) dell'intervallo,
    con ora di pubblicazione e ritardo rispetto alla fine della finestra;
 3. la struttura del file (variabili, dimensioni, unità) del primo pacchetto;
 4. i flash entro 100 km dalla stazione, con ora italiana, distanza e direzione,
@@ -113,11 +116,26 @@ def main():
     print("1. Autenticazione riuscita.")
 
     ora = datetime.now(timezone.utc)
+    dal_txt, al_txt = os.environ.get("DAL", "").strip(), os.environ.get("AL", "").strip()
+    if dal_txt and al_txt:
+        try:
+            dal = datetime.strptime(dal_txt, "%Y-%m-%d %H:%M").replace(tzinfo=ROMA).astimezone(timezone.utc)
+            al = datetime.strptime(al_txt, "%Y-%m-%d %H:%M").replace(tzinfo=ROMA).astimezone(timezone.utc)
+        except ValueError:
+            print('DAL e AL vanno scritti come "AAAA-MM-GG HH:MM" (ora italiana).')
+            sys.exit(1)
+        if not (timedelta(0) < al - dal <= timedelta(hours=6)):
+            print("L'intervallo deve essere positivo e al massimo di 6 ore.")
+            sys.exit(1)
+        descr = f"dal {dal_txt} al {al_txt} (ora italiana, archivio)"
+    else:
+        dal, al = ora - timedelta(minutes=90), ora
+        descr = "nell'ultima ora e mezza"
     store = eumdac.DataStore(token)
     coll = store.get_collection(COLLEZIONE)
-    prodotti = list(coll.search(dtstart=ora - timedelta(minutes=90), dtend=ora))
+    prodotti = list(coll.search(dtstart=dal, dtend=al))
     prodotti.sort(key=lambda p: p.sensing_start)
-    print(f"\n2. Pacchetti LFL trovati nell'ultima ora e mezza: {len(prodotti)}")
+    print(f"\n2. Pacchetti LFL trovati {descr}: {len(prodotti)}")
     tutti_t, tutti_lat, tutti_lon = [], [], []
     stampata_struttura = False
     for p in prodotti:
@@ -152,9 +170,16 @@ def main():
     for f in FASCE:
         print(f"   {prec}-{f} km: {int(((d >= prec) & (d < f)).sum())}")
         prec = f
+    lontani = (d >= 100) & (d < 300)
+    if lontani.any():
+        cont = {k: 0 for k in PUNTI}
+        for a in az[lontani]:
+            cont[PUNTI[int(((a % 360) + 22.5) // 45) % 8]] += 1
+        print("   direzione dei flash tra 100 e 300 km: " + ", ".join(f"{k} {v}" for k, v in cont.items() if v))
     vicini = np.where(d < 100)[0]
-    print(f"\n4. Flash entro 100 km: {len(vicini)} (i più recenti per primi, massimo 40)")
-    for i in sorted(vicini, key=lambda k: tutti_t[k], reverse=True)[:40]:
+    print(f"\n4. Flash entro 100 km: {len(vicini)} (in ordine di tempo, massimo 60)")
+    passo = max(1, len(vicini) // 60)
+    for i in sorted(vicini, key=lambda k: tutti_t[k])[::passo][:60]:
         print(f"   {tutti_t[i].astimezone(ROMA):%d/%m %H:%M:%S}  {d[i]:5.1f} km  {PUNTI[int(((az[i] % 360) + 22.5) // 45) % 8]:>2}"
               f"  ({lat[i]:.3f}, {lon[i]:.3f})")
     print(f"\nLetto alle {ora.astimezone(ROMA):%H:%M:%S} ora italiana. Dati: EUMETSAT, MTG LI L2 (CC BY 4.0).")
