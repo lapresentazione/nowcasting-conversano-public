@@ -1,0 +1,31 @@
+name: Fulmini EUMETSAT - prova manuale
+
+# Parte SOLO a mano (Actions > Fulmini EUMETSAT - prova manuale > Run workflow).
+# Sola lettura: non invia messaggi e non tocca stato o registro del sistema radar.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prova-fulmini:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Scarica codice
+        uses: actions/checkout@v6
+
+      - name: Configura Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Installa librerie
+        run: python -m pip install eumdac netCDF4 numpy
+
+      - name: Legge i fulmini dell'ultima ora e mezza
+        env:
+          EUMETSAT_CONSUMER_KEY: ${{ secrets.EUMETSAT_CONSUMER_KEY }}
+          EUMETSAT_CONSUMER_SECRET: ${{ secrets.EUMETSAT_CONSUMER_SECRET }}
+        run: python prova_fulmini.py
