@@ -4,4 +4,6 @@ pyproj>=3.6,<4
 requests>=2.31,<3
 scipy>=1.11,<2
 matplotlib>=3.8,<4
+eumdac>=3.0,<4
+netCDF4>=1.7,<2
 pytest>=8,<10

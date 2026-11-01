@@ -3,6 +3,8 @@
 Mostra la pioggia stimata (SRI), i cerchi a 5/10/20/40 km, la costa (Natural Earth,
 pubblico dominio), alcune località di riferimento, la freccia del moto e le celle
 che soddisfano le regole dell'avviso di avvicinamento con l'arrivo stimato.
+Versione 5 (01/11/2026): i lampi del satellite degli ultimi 30 minuti, come croci
+(nere fino a 10 minuti, grigio scuro 10-20, grigio chiaro 20-30).
 """
 import io
 import json
@@ -41,7 +43,7 @@ def _a_km(geo, r_st, c_st, lon, lat):
     return (col - c0 - 0.5) - c_st, r_st - (row - r0 - 0.5)
 
 
-def disegna(campo, r_st, c_st, geo, titolo, moto=None, celle=(), raggio=50):
+def disegna(campo, r_st, c_st, geo, titolo, moto=None, celle=(), raggio=50, lampi=None):
     """Restituisce i byte PNG della mappa."""
     h = raggio
     sub = campo[r_st - h:r_st + h + 1, c_st - h:c_st + h + 1]
@@ -86,6 +88,18 @@ def disegna(campo, r_st, c_st, geo, titolo, moto=None, celle=(), raggio=50):
                     xytext=(-60 if x > 15 else 6, -22 if y > -35 else 8),
                     textcoords="offset points", fontsize=8, fontweight="bold",
                     bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.85))
+    nota_lampi = ""
+    if lampi is not None:
+        nota_lampi = " Lampi: EUMETSAT MTG LI."
+        ax.text(-h + 2, h - 2, "+ lampi da satellite (nero 0-10 min, grigio 10-30)",
+                fontsize=7, va="top", bbox=dict(fc="white", alpha=0.7, lw=0), zorder=6)
+        if lampi:
+            lat, lon, eta = (np.array(v, dtype=float) for v in zip(*lampi))
+            x, y = _a_km(geo, r_st, c_st, lon, lat)
+            for lo_, hi_, col in ((20, 30, "#aaaaaa"), (10, 20, "#666666"), (-1, 10, "#000000")):
+                k = (eta >= lo_) & (eta < hi_) & (np.abs(x) <= h) & (np.abs(y) <= h)
+                if k.any():
+                    ax.plot(x[k], y[k], "+", ms=7, mew=1.6, color=col, zorder=5)
     ax.set_xlim(-h, h)
     ax.set_ylim(-h, h)
     ax.set_xlabel("km verso est")
@@ -96,7 +110,7 @@ def disegna(campo, r_st, c_st, geo, titolo, moto=None, celle=(), raggio=50):
     cb.set_label("mm/h stimati", fontsize=8)
     cb.ax.tick_params(labelsize=7)
     fig.text(0.01, 0.005, "Dati: radar Protezione Civile (SRI). Stima sperimentale, non ufficiale. "
-             "Grigio: nessun dato.", fontsize=6, color="#555555")
+             "Grigio: nessun dato." + nota_lampi, fontsize=6, color="#555555")
     buf = io.BytesIO()
     fig.tight_layout()
     fig.savefig(buf, format="png")

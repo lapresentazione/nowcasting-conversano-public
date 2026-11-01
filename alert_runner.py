@@ -35,6 +35,20 @@ Versione 4 (moto delle celle, avvicinamento e mappa, 30/10/2026):
   avvicinamento, per le verifiche successive;
 - stato: nuovo campo facoltativo "approach_scan" (ora della scansione dell'ultimo
   avviso di avvicinamento); gli altri campi non cambiano.
+
+Versione 5 (attività elettrica dal satellite, 01/11/2026, scelte di Michele):
+- a ogni esecuzione scarica, in parallelo al radar e con un tempo massimo, i lampi
+  degli ultimi 30 minuti del satellite EUMETSAT MTG (fulmini.py);
+- ogni messaggio radar riporta una riga sull'attività elettrica entro 40 km negli
+  ultimi 20 minuti; la mappa mostra i lampi degli ultimi 30 minuti;
+- avviso autonomo di attività elettrica (regola A): almeno 2 lampi entro 30 km negli
+  ultimi 20 minuti; un nuovo avviso solo dopo 60 minuti senza lampi entro 30 km. Se
+  nella stessa esecuzione parte anche un avviso radar, l'avviso fulmini è unito a quel
+  messaggio (un solo messaggio). Controllato anche quando non ci sono scansioni nuove;
+- stato: campi facoltativi lightning_active, lightning_last_inside, lightning_alert;
+- registro: nella colonna dettaglio della riga "ultima" (o "gia_elaborata") il
+  riepilogo dei lampi e avviso_fulmini=0/1;
+- senza dati satellitari (chiavi assenti, errore, ritardo) il radar lavora come prima.
 """
 import argparse
 import base64
@@ -47,6 +61,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 import requests
+import fulmini as fl
 from nowcasting import (new_session, last_product_time, download_raw, observe,
                         evaluate, message, ITALY, STEP)
 
@@ -500,7 +515,7 @@ class RadarContext:
         moto = self.motion(when)
         return c, moto, mv.celle(c[0], c[1], c[2], moto)
 
-    def map_png(self, when, titolo):
+    def map_png(self, when, titolo, lampi=None):
         import mappa
         a = self.analysis(when)
         if a is None:
@@ -509,28 +524,55 @@ class RadarContext:
         ora = datetime.fromtimestamp(when / 1000, ITALY).strftime("%d/%m/%Y %H:%M")
         import movimento as mv
         full = f"{titolo} – scansione {ora}\npioggia {mv.descrivi_moto(moto)}"
-        return mappa.disegna(campo, r, cc, geo, full, moto, cl), moto
+        return mappa.disegna(campo, r, cc, geo, full, moto, cl, lampi=lampi), moto
 
 
-def make_sender(ctx, text_sender, photo_sender, log=print):
-    """send(testo, ora): allega la mappa e il moto; ripiega sul solo testo."""
+CAPTION_MAX = 1024  # limite Telegram per la didascalia di una foto
+
+
+def is_lightning_alert(text):
+    return text.split("\n", 1)[0].startswith("Radar Conversano: attività elettrica")
+
+
+def make_sender(ctx, text_sender, photo_sender, log=print, att=None, avviso=None):
+    """send(testo, ora): allega la mappa e il moto; ripiega sul solo testo.
+
+    att (fulmini.Attivita): aggiunge la riga sull'attività elettrica e i lampi sulla mappa.
+    avviso: {"pendente": bool, "inviato": bool}; se pendente, il primo messaggio radar
+    inviato include l'avviso di attività elettrica e "inviato" diventa True.
+    """
     def send(text, when):
+        unito = False
+        if att is not None and not is_lightning_alert(text):
+            if avviso and avviso.get("pendente") and not avviso.get("inviato") and att.disponibile:
+                text = fl.aggiungi_avviso_a_messaggio(text, att)
+                unito = True
+            else:
+                text = text.replace("\nScansione:", f"\n{att.riga()}\nScansione:", 1)
+        lampi = att.per_mappa() if att is not None and att.disponibile else None
         png = None
         try:
-            png, moto = ctx.map_png(when, "Radar Conversano PGL320")
+            png, moto = ctx.map_png(when, "Radar Conversano PGL320", lampi=lampi)
             if moto and "Cella a " not in text:  # l'avviso di avvicinamento ha già il moto
                 import movimento as mv
                 text = text.replace("\nScansione:", f"\nPioggia {mv.descrivi_moto(moto)}.\nScansione:", 1)
         except Exception as error:
             log(f"Mappa non prodotta: {type(error).__name__}")
             png = None
+        sent = False
         if png:
             try:
-                photo_sender(png, text)
-                return
+                if len(text) <= CAPTION_MAX:
+                    photo_sender(png, text)
+                    sent = True
+                else:  # didascalia breve sulla foto, testo completo a parte
+                    photo_sender(png, text.split("\n", 1)[0])
             except Exception as error:
                 log(f"Foto non inviata ({type(error).__name__}): invio il solo testo")
-        text_sender(text)
+        if not sent:
+            text_sender(text)
+        if unito:
+            avviso["inviato"] = avviso["unito"] = True
     return send
 
 
@@ -597,6 +639,21 @@ def fetch_observations(session, new_times):
     return obs, raws, missing
 
 
+def start_lightning(run_dt):
+    """Avvia lo scaricamento dei lampi; senza chiavi restituisce un risultato vuoto."""
+    if not (os.environ.get("EUMETSAT_CONSUMER_KEY", "").strip()
+            and os.environ.get("EUMETSAT_CONSUMER_SECRET", "").strip()):
+        class Assente:
+            def risultato(self, ora):
+                return fl.Attivita.non_disponibile("chiavi EUMETSAT assenti")
+        return Assente()
+    return fl.Scaricamento(run_dt)
+
+
+def lightning_changed(old, new):
+    return any(old.get(k, v) != new.get(k, v) for k, v in fl.STATO_INIZIALE.items())
+
+
 def main():
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
@@ -613,6 +670,7 @@ def main():
             "notifica_inviata": 0, "dettaglio": f"evento={event}"}
     rows = []
     stage = "radar"
+    scaricamento = start_lightning(run_dt)
     try:
         session = new_session()
         latest = last_product_time(session)
@@ -644,6 +702,39 @@ def main():
             rows = [row]
             print("Nessuna scansione nuova dopo "
                   f"{datetime.fromtimestamp(last_done / 1000, ITALY):%d/%m %H:%M}.")
+            # Attività elettrica anche senza scansioni nuove (mappa sull'ultima scansione).
+            stage = "fulmini"
+            att = scaricamento.risultato(run_dt)
+            print(att.riga())
+            f_state, f_alert = fl.valuta_avviso(state, att)
+            note = att.registro()
+            if f_alert:
+                ctx = RadarContext(session, {})
+                try:
+                    ctx.raws[latest] = download_raw(session, latest)
+                except Exception:
+                    ctx.raws[latest] = None
+                sent_dry = []
+                if args.dry_run:
+                    send = make_sender(ctx, sent_dry.append, lambda png, t: sent_dry.append(t), att=att)
+                else:
+                    send = make_sender(ctx, send_telegram, send_telegram_photo, att=att)
+                try:
+                    send(fl.testo_avviso(att, latest, RADAR_LINK), latest)
+                    note += "; avviso_fulmini=1"
+                    for text in sent_dry:
+                        print("SOLO SIMULAZIONE, avviso non inviato:\n" + text)
+                except Exception as error:
+                    note += f"; avviso_fulmini=errore {type(error).__name__}"
+                    f_state = {k: state.get(k, v) for k, v in fl.STATO_INIZIALE.items()}
+            else:
+                note += "; avviso_fulmini=0"
+            row["dettaglio"] = f"{row['dettaglio']}; {note}"
+            new_state = dict(state, **f_state)
+            if not args.dry_run and lightning_changed(state, new_state):
+                stage = "salvataggio_stato"
+                persist_state(github_token, new_state, sha)
+                print("Stato fulmini salvato nel repository")
             write_log(args, rows, run_dt)
             return
 
@@ -663,6 +754,13 @@ def main():
         except Exception as error:
             motion_note = f"moto=errore {type(error).__name__}"
 
+        stage = "fulmini"
+        att = scaricamento.risultato(run_dt)
+        print(att.riga())
+        f_state, f_alert = fl.valuta_avviso(state, att)
+        avviso = {"pendente": f_alert, "inviato": False}
+        lightning_note = att.registro()
+
         stage = "elaborazione"
         if args.dry_run:
             sent = []
@@ -678,9 +776,9 @@ def main():
                     with open(path, "wb") as fh:
                         fh.write(png)
                     print(f"Mappa salvata: {path}")
-            send = make_sender(ctx, dry_text, dry_photo)
+            send = make_sender(ctx, dry_text, dry_photo, att=att, avviso=avviso)
         else:
-            send = make_sender(ctx, send_telegram, send_telegram_photo)
+            send = make_sender(ctx, send_telegram, send_telegram_photo, att=att, avviso=avviso)
         try:
             next_state, should_save, rows = process_scans(
                 state, obs, new_times, run_dt, base, send)
@@ -700,6 +798,24 @@ def main():
                 should_save = should_save or approach_save
             except Exception as error:
                 motion_note = f"moto=errore {type(error).__name__}"
+
+        # Avviso di attività elettrica non già unito a un messaggio radar.
+        if f_alert and not avviso["inviato"]:
+            try:
+                send(fl.testo_avviso(att, latest, RADAR_LINK), latest)
+                avviso["inviato"] = True
+            except Exception as error:
+                lightning_note += f"; avviso_fulmini=errore {type(error).__name__}"
+        if f_alert and avviso["inviato"]:
+            lightning_note += "; avviso_fulmini=1" + (" (unito al messaggio radar)"
+                                                      if avviso.get("unito") else "")
+        elif not f_alert:
+            lightning_note += "; avviso_fulmini=0"
+        if not f_alert or avviso["inviato"]:
+            before = dict(next_state)
+            next_state = dict(next_state, **f_state)
+            should_save = should_save or lightning_changed(before, next_state)
+        motion_note = "; ".join(x for x in (motion_note, lightning_note) if x)
         if rows and rows[-1].get("ruolo_scansione") == "ultima" and motion_note:
             rows[-1]["dettaglio"] = f"{rows[-1].get('dettaglio', '')}; {motion_note}"
 
