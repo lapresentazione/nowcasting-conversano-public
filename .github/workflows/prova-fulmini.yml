@@ -4,6 +4,15 @@ name: Fulmini EUMETSAT - prova manuale
 # Sola lettura: non invia messaggi e non tocca stato o registro del sistema radar.
 on:
   workflow_dispatch:
+    inputs:
+      dal:
+        description: 'Inizio, ora italiana "AAAA-MM-GG HH:MM" (vuoto = ultima ora e mezza)'
+        required: false
+        default: ''
+      al:
+        description: 'Fine, ora italiana "AAAA-MM-GG HH:MM" (massimo 6 ore dopo l inizio)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -24,8 +33,10 @@ jobs:
       - name: Installa librerie
         run: python -m pip install eumdac netCDF4 numpy
 
-      - name: Legge i fulmini dell'ultima ora e mezza
+      - name: Legge i fulmini
         env:
+          DAL: ${{ inputs.dal }}
+          AL: ${{ inputs.al }}
           EUMETSAT_CONSUMER_KEY: ${{ secrets.EUMETSAT_CONSUMER_KEY }}
           EUMETSAT_CONSUMER_SECRET: ${{ secrets.EUMETSAT_CONSUMER_SECRET }}
         run: python prova_fulmini.py
