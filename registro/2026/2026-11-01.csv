@@ -50,3 +50,4 @@ run_utc,run_id,esito,dettaglio,ruolo_scansione,scan_utc,scan_ora_italiana,ritard
 2026-11-01T03:55:40Z,41271038702,ok,"evento=workflow_dispatch; nuove=2; moto=in moto da ovest a 12 km/h (dispersione 11 km/h, 5 vettori)",ultima,2026-11-01T03:45:00Z,01/11/2026 04:45,10.7,0,sotto soglia,0.0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,5.84,233,4,0,0,0,0,0
 2026-11-01T04:03:55Z,41271577811,ok,evento=schedule; nuove=2,intermedia,2026-11-01T03:50:00Z,01/11/2026 04:50,13.9,0,sotto soglia,0.0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,5.21,167,1,0,0,0,0,0
 2026-11-01T04:03:55Z,41271577811,ok,"evento=schedule; nuove=2; moto=in moto da ovest a 19 km/h (dispersione 9 km/h, 5 vettori)",ultima,2026-11-01T03:55:00Z,01/11/2026 04:55,8.9,0,sotto soglia,0.0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,0.0,0,0,0,1.0,5.2,167,1,0,0,0,0,0
+2026-11-01T04:05:40Z,41271683611,nessuna_novita,evento=workflow_dispatch,gia_elaborata,2026-11-01T03:55:00Z,01/11/2026 04:55,10.7,,,,,,,,,,,,,,,,,,,,,,,,0,0,0,
