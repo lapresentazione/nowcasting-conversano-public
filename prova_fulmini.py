@@ -12,7 +12,10 @@ Cosa stampa:
    con ora di pubblicazione e ritardo rispetto alla fine della finestra;
 3. la struttura del file (variabili, dimensioni, unità) del primo pacchetto;
 4. i flash entro 100 km dalla stazione, con ora italiana, distanza e direzione,
-   e un conteggio per fasce di distanza (più quelli entro 300 km).
+   e un conteggio per fasce di distanza (più quelli entro 300 km);
+5. (v2, 01/11/2026) il conteggio a 5 minuti dei flash entro 40 km, per fasce di distanza,
+   con il flash più vicino di ogni intervallo: serve al confronto con il WH57.
+Conteggi ed elenchi usano solo i flash compresi nell'intervallo richiesto.
 """
 import io
 import math
@@ -164,8 +167,15 @@ def main():
         return
     lat = np.concatenate(tutti_lat)
     lon = np.concatenate(tutti_lon)
+    # v2: solo i flash dentro l'intervallo richiesto (i pacchetti da 10 minuti possono sporgere)
+    dentro = np.array([dal <= t < al for t in tutti_t])
+    tutti_t = [t for t, k in zip(tutti_t, dentro) if k]
+    lat, lon = lat[dentro], lon[dentro]
+    if not tutti_t:
+        print("\nNessun flash nell'intervallo richiesto.")
+        return
     d, az = distanza_direzione(lat, lon)
-    print("\n3. Flash per distanza dalla stazione (tutta la finestra letta):")
+    print(f"\n3. Flash per distanza dalla stazione ({dal.astimezone(ROMA):%d/%m %H:%M}-{al.astimezone(ROMA):%d/%m %H:%M} ora italiana):")
     prec = 0
     for f in FASCE:
         print(f"   {prec}-{f} km: {int(((d >= prec) & (d < f)).sum())}")
@@ -178,11 +188,35 @@ def main():
         print("   direzione dei flash tra 100 e 300 km: " + ", ".join(f"{k} {v}" for k, v in cont.items() if v))
     vicini = np.where(d < 100)[0]
     print(f"\n4. Flash entro 100 km: {len(vicini)} (in ordine di tempo, massimo 60)")
-    passo = max(1, len(vicini) // 60)
+    passo = max(1, math.ceil(len(vicini) / 60))   # v2: il campione copre tutto l'intervallo
+    if passo > 1:
+        print(f"   (uno ogni {passo}, per coprire tutto l'intervallo)")
     for i in sorted(vicini, key=lambda k: tutti_t[k])[::passo][:60]:
         print(f"   {tutti_t[i].astimezone(ROMA):%d/%m %H:%M:%S}  {d[i]:5.1f} km  {PUNTI[int(((az[i] % 360) + 22.5) // 45) % 8]:>2}"
               f"  ({lat[i]:.3f}, {lon[i]:.3f})")
+    tabella_5_minuti(tutti_t, d, az)
     print(f"\nLetto alle {ora.astimezone(ROMA):%H:%M:%S} ora italiana. Dati: EUMETSAT, MTG LI L2 (CC BY 4.0).")
+
+
+def tabella_5_minuti(tempi, d, az):
+    """v2: flash entro 40 km per intervallo di 5 minuti (ora italiana, inizio-fine)."""
+    entro = np.where(d < 40)[0]
+    print(f"\n5. Flash entro 40 km per intervallo di 5 minuti: {len(entro)} in totale")
+    if not len(entro):
+        return
+    print("   intervallo     <20  20-30  30-40  totale   piu vicino")
+    gruppi = {}
+    for i in entro:
+        t = tempi[i].astimezone(ROMA)
+        inizio = t.replace(minute=t.minute - t.minute % 5, second=0, microsecond=0)
+        gruppi.setdefault(inizio, []).append(i)
+    for inizio in sorted(gruppi):
+        ii = gruppi[inizio]
+        dd = d[ii]
+        k = ii[int(np.argmin(dd))]
+        fine = inizio + timedelta(minutes=5)
+        print(f"   {inizio:%d/%m %H:%M}-{fine:%H:%M}  {int((dd < 20).sum()):3d}  {int(((dd >= 20) & (dd < 30)).sum()):5d}"
+              f"  {int((dd >= 30).sum()):5d}  {len(ii):6d}   {d[k]:4.1f} km {PUNTI[int(((az[k] % 360) + 22.5) // 45) % 8]}")
 
 
 if __name__ == "__main__":
