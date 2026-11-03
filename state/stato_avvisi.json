@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "active": true,
-  "level": 1,
-  "quiet": 1,
-  "last_scan": 1793712600000,
+  "active": false,
+  "level": 0,
+  "quiet": 0,
+  "last_scan": 1793712900000,
   "last_alert_scan": 1793711100000,
-  "approach_scan": 1793696100000,
+  "approach_scan": 1793712900000,
   "lightning_active": false,
   "lightning_last_inside": 1793665921891,
   "lightning_alert": 1793600401000
