@@ -60,6 +60,9 @@ Versione 5.1 (09/11/2026, dalla verifica settimanale del 02-08/11, su richiesta 
   (la pioggia è già arrivata, anche se debole): registro "avviso_avvicinamento=0
   (pioggia già entro 5 km)". Simulato sul registro 30/10-09/11: avvisi L1/L2 da 42 a 29,
   avvicinamento da 23 a 20, arrivi nuovi annunciati invariati (17 su 22).
+- salvataggio dello stato (09/11/2026): se GitHub rifiuta la scrittura, rilegge lo stato
+  e riprova una volta dopo pochi secondi; nel registro compaiono il codice HTTP
+  dell'errore e l'eventuale secondo tentativo riuscito ("salvataggio_ritentato=HTTP NNN").
 """
 import argparse
 import base64
@@ -68,6 +71,7 @@ import io
 import json
 import os
 import sys
+import time
 from copy import deepcopy
 from datetime import datetime, timezone
 
@@ -413,16 +417,55 @@ def load_state(token):
     return obj, data["sha"]
 
 
-def persist_state(token, state, sha):
+SAVE_RETRY_WAIT_S = 3
+NO_RETRY_CODES = (401, 403, 404)  # credenziali o percorso: riprovare non serve
+
+
+class StateSaveError(RuntimeError):
+    """Salvataggio dello stato non riuscito; il messaggio contiene solo il codice HTTP."""
+
+
+def describe_error(error):
+    """Nome dell'errore e, se c'è, il codice HTTP (mai URL o credenziali)."""
+    if isinstance(error, StateSaveError):
+        return f"{type(error).__name__} {error}"
+    code = getattr(getattr(error, "response", None), "status_code", None)
+    return type(error).__name__ + (f" HTTP {code}" if code else "")
+
+
+def persist_state(token, state, sha, wait_s=None):
+    """Scrive lo stato; in caso di rifiuto rilegge lo sha e riprova una volta.
+
+    Restituisce None se il primo tentativo riesce, altrimenti una nota per il registro
+    ("salvataggio_ritentato=HTTP NNN"). Se anche il secondo fallisce: StateSaveError.
+    """
     data = json.dumps(state, indent=2, ensure_ascii=False) + "\n"
-    payload = {
-        "message": "Aggiorna stato avvisi radar [skip ci]",
-        "content": base64.b64encode(data.encode("utf-8")).decode("ascii"),
-    }
-    if sha:
-        payload["sha"] = sha
-    resp = github_request("PUT", FILE_PATH, token, body=payload)
-    resp.raise_for_status()
+    content = base64.b64encode(data.encode("utf-8")).decode("ascii")
+    first = None
+    for attempt in (1, 2):
+        payload = {"message": "Aggiorna stato avvisi radar [skip ci]", "content": content}
+        if sha:
+            payload["sha"] = sha
+        try:
+            resp = github_request("PUT", FILE_PATH, token, body=payload)
+            code = resp.status_code
+        except requests.RequestException as error:
+            code = type(error).__name__
+        if code in (200, 201):
+            return None if attempt == 1 else f"salvataggio_ritentato={first}"
+        reason = f"HTTP {code}" if isinstance(code, int) else code
+        if attempt == 2 or code in NO_RETRY_CODES:
+            raise StateSaveError(reason if first is None else f"{first}, poi {reason}")
+        first = reason
+        time.sleep(SAVE_RETRY_WAIT_S if wait_s is None else wait_s)
+        try:  # lo sha potrebbe essere cambiato: rileggerlo
+            got = github_request("GET", FILE_PATH, token)
+            if got.status_code == 200:
+                sha = got.json().get("sha", sha)
+            elif got.status_code == 404:
+                sha = None
+        except requests.RequestException:
+            pass
 
 
 def send_telegram(text):
@@ -753,7 +796,9 @@ def main():
             new_state = dict(state, **f_state)
             if not args.dry_run and lightning_changed(state, new_state):
                 stage = "salvataggio_stato"
-                persist_state(github_token, new_state, sha)
+                nota = persist_state(github_token, new_state, sha)
+                if nota:
+                    row["dettaglio"] += f"; {nota}"
                 print("Stato fulmini salvato nel repository")
             write_log(args, rows, run_dt)
             return
@@ -852,7 +897,9 @@ def main():
             return
         if should_save:
             stage = "salvataggio_stato"
-            persist_state(github_token, next_state, sha)
+            nota = persist_state(github_token, next_state, sha)
+            if nota and rows:
+                rows[-1]["dettaglio"] = f"{rows[-1].get('dettaglio', '')}; {nota}"
             print("Stato radar salvato nel repository")
         else:
             print("Nessuna nuova notifica e nessun aggiornamento dello stato")
@@ -860,7 +907,7 @@ def main():
     except Exception as error:
         if not rows or not str(rows[-1].get("esito", "")).startswith("errore"):
             rows = rows + [dict(base, esito=f"errore_{stage}",
-                                dettaglio=f"{base['dettaglio']}; {type(error).__name__}")]
+                                dettaglio=f"{base['dettaglio']}; {describe_error(error)}")]
         write_log(args, rows, run_dt)
         raise
 

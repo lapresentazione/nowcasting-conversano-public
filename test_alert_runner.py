@@ -488,3 +488,68 @@ class MappaInvioTest(unittest.TestCase):
         send = make_sender(ctx, texts.append, lambda p, t: None, log=lambda m: None)
         send("testo", T0)
         self.assertEqual(texts, ["testo"])
+
+
+class SalvataggioStatoTest(unittest.TestCase):
+    """v5.1 (09/11/2026): codice HTTP nel registro e un secondo tentativo."""
+
+    class Resp:
+        def __init__(self, code, sha=None):
+            self.status_code = code
+            self._sha = sha
+
+        def json(self):
+            return {"sha": self._sha}
+
+    def run_with(self, risposte):
+        import alert_runner as ar
+        chiamate = []
+
+        def finto(method, path, token, body=None):
+            chiamate.append((method, (body or {}).get("sha")))
+            r = risposte.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        orig = ar.github_request
+        ar.github_request = finto
+        try:
+            return ar.persist_state("t", {"a": 1}, "sha0", wait_s=0), chiamate
+        finally:
+            ar.github_request = orig
+
+    def test_primo_tentativo_riuscito(self):
+        nota, chiamate = self.run_with([self.Resp(200)])
+        self.assertIsNone(nota)
+        self.assertEqual(chiamate, [("PUT", "sha0")])
+
+    def test_conflitto_poi_riuscito_con_sha_riletto(self):
+        nota, chiamate = self.run_with([self.Resp(409), self.Resp(200, "sha1"), self.Resp(200)])
+        self.assertEqual(nota, "salvataggio_ritentato=HTTP 409")
+        self.assertEqual(chiamate, [("PUT", "sha0"), ("GET", None), ("PUT", "sha1")])
+
+    def test_errore_di_rete_poi_riuscito(self):
+        import requests
+        nota, _ = self.run_with([requests.ConnectionError("x"), self.Resp(200, "sha0"), self.Resp(201)])
+        self.assertEqual(nota, "salvataggio_ritentato=ConnectionError")
+
+    def test_credenziali_non_riprova(self):
+        import alert_runner as ar
+        with self.assertRaises(ar.StateSaveError) as ctx:
+            self.run_with([self.Resp(401)])
+        self.assertEqual(str(ctx.exception), "HTTP 401")
+        self.assertEqual(ar.describe_error(ctx.exception), "StateSaveError HTTP 401")
+
+    def test_due_fallimenti(self):
+        import alert_runner as ar
+        with self.assertRaises(ar.StateSaveError) as ctx:
+            self.run_with([self.Resp(502), self.Resp(200, "sha1"), self.Resp(503)])
+        self.assertEqual(str(ctx.exception), "HTTP 502, poi HTTP 503")
+
+    def test_descrizione_errore_http(self):
+        import alert_runner as ar
+        import requests
+        e = requests.HTTPError("https://segreto")
+        e.response = self.Resp(409)
+        self.assertEqual(ar.describe_error(e), "HTTPError HTTP 409")
+        self.assertEqual(ar.describe_error(ValueError("x")), "ValueError")
