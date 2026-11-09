@@ -37,7 +37,8 @@ class RadarStateTest(unittest.TestCase):
         self.assertTrue(save)
         self.assertEqual(stronger["level"], 2)
 
-    def test_clear_after_two_distinct_scans(self):
+    def test_clear_after_four_distinct_scans(self):
+        # v5.1: l'episodio si chiude dopo QUIET_SCANS (4) scansioni distinte sotto soglia
         active, _, _ = decide(state(), 1, 300000)
         first_clear, alert, save = decide(active, 0, 600000)
         self.assertFalse(alert)
@@ -46,10 +47,24 @@ class RadarStateTest(unittest.TestCase):
         same, alert, save = decide(first_clear, 0, 600000)
         self.assertFalse(save)
         self.assertEqual(same["quiet"], 1)
-        second_clear, alert, save = decide(first_clear, 0, 900000)
-        self.assertFalse(second_clear["active"])
-        new_episode, alert, save = decide(second_clear, 1, 1200000)
+        s = first_clear
+        for k, t in enumerate((900000, 1200000), start=2):
+            s, alert, _ = decide(s, 0, t)
+            self.assertTrue(s["active"], f"ancora attivo dopo {k} scansioni")
+            self.assertFalse(alert)
+        s, alert, _ = decide(s, 0, 1500000)
+        self.assertFalse(s["active"])
+        new_episode, alert, save = decide(s, 1, 1800000)
         self.assertTrue(alert)
+
+    def test_reopening_within_20_minutes_is_same_episode(self):
+        active, _, _ = decide(state(), 1, 300000)
+        s = active
+        for t in (600000, 900000, 1200000):
+            s, _, _ = decide(s, 0, t)
+        again, alert, _ = decide(s, 1, 1500000)
+        self.assertFalse(alert)
+        self.assertTrue(again["active"])
 
     def test_brief_clear_not_new_episode(self):
         active, _, _ = decide(state(), 1, 300000)
@@ -411,6 +426,26 @@ class AvvicinamentoTest(unittest.TestCase):
             self.assertIn("avviso_avvicinamento=0", info2)
         finally:
             mv.cella_in_avvicinamento = orig
+
+    def test_no_approach_when_rain_already_within_5_km(self):
+        ctx, latest = ctx_from_fixture()
+        sent = []
+        cella = {"arrivo_min": 30.0, "arrivo_range_min": (25.0, 40.0), "quota_concordi": 0.8,
+                 "dist_km": 9.0, "direzione_gradi": 45.0, "max_mm_h": 3.2, "area_km2": 20,
+                 "punto_km": (6.0, 6.0)}
+        vicina = dict(cella, dist_km=3.0, arrivo_min=0.0)
+        orig_c, orig_s = mv.cella_in_avvicinamento, mv.celle
+        mv.cella_in_avvicinamento = lambda cl: cella
+        mv.celle = lambda *a, **k: [vicina, cella]
+        try:
+            st, save, info = evaluate_approach(ctx, dict(DEFAULT), latest, run_dt_after(latest),
+                                               lambda t, w: sent.append(t))
+            self.assertEqual(sent, [])
+            self.assertFalse(save)
+            self.assertIn("avviso_avvicinamento=0 (pioggia già entro 5 km)", info)
+            self.assertIn("avvicinamento=30 min", info)  # la cella resta nel registro
+        finally:
+            mv.cella_in_avvicinamento, mv.celle = orig_c, orig_s
 
     def test_real_case_no_approach_at_2250(self):
         ctx, latest = ctx_from_fixture()

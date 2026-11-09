@@ -51,6 +51,15 @@ Versione 5 (attività elettrica dal satellite, 01/11/2026, scelte di Michele):
 - senza dati satellitari (chiavi assenti, errore, ritardo) il radar lavora come prima;
 - con lampi entro 40 km negli ultimi 20 minuti il messaggio radar non riporta più la
   frase "Non implica un temporale" (01/11/2026).
+
+Versione 5.1 (09/11/2026, dalla verifica settimanale del 02-08/11, su richiesta di Michele):
+- un episodio L1/L2 si chiude dopo QUIET_SCANS = 4 scansioni distinte sotto soglia
+  (20 minuti) invece di 2: con 2, metà delle scansioni :x5 ripete la :x0 e l'episodio
+  si chiudeva e riapriva fra uno scroscio e l'altro (L1 ripetuti);
+- l'avviso di avvicinamento non parte se c'è già una cella di pioggia entro 5 km
+  (la pioggia è già arrivata, anche se debole): registro "avviso_avvicinamento=0
+  (pioggia già entro 5 km)". Simulato sul registro 30/10-09/11: avvisi L1/L2 da 42 a 29,
+  avvicinamento da 23 a 20, arrivi nuovi annunciati invariati (17 su 22).
 """
 import argparse
 import base64
@@ -70,6 +79,7 @@ from nowcasting import (new_session, last_product_time, download_raw, observe,
 FILE_PATH = "state/stato_avvisi.json"
 LOG_DIR = "registro"
 STALE_MS = 120 * 60_000  # 120 minuti senza scansioni valide elaborate
+QUIET_SCANS = 4  # scansioni distinte sotto soglia per chiudere un episodio (v5.1; prima 2)
 # Scansioni nuove elaborate al massimo per esecuzione (12 x 5 min = 60 min).
 MAX_NEW_SCANS = int(os.environ.get("RADAR_MAX_SCANS", "12"))
 # Oltre questo ritardo il messaggio dichiara che l'avviso arriva in recupero.
@@ -103,7 +113,7 @@ def decide(old, level, scan_time):
     """Restituisce (nuovo stato, notifica?, salvataggio?).
 
     Non invia avvisi ripetuti quando l'episodio è ancora attivo.
-    Disarma dopo due scansioni successive distinte senza soglia, oppure
+    Disarma dopo QUIET_SCANS scansioni successive distinte senza soglia, oppure
     d'ufficio se l'ultima scansione valida elaborata è più vecchia di STALE_MS.
     """
     state = deepcopy(old)
@@ -130,7 +140,7 @@ def decide(old, level, scan_time):
         return state, False, False
     state["quiet"] += 1
     state["last_scan"] = scan_time
-    if state["quiet"] >= 2:
+    if state["quiet"] >= QUIET_SCANS:
         state.update(active=False, level=0, quiet=0)
     return state, False, True
 
@@ -618,6 +628,9 @@ def evaluate_approach(ctx, state, latest, run_dt, send_approach):
     info += (f"; avvicinamento={cella['arrivo_min']:.0f} min ({lo:.0f}-{hi:.0f}), "
              f"{cella['dist_km']:.0f} km {mv.punto_cardinale(cella['direzione_gradi'])}, "
              f"{cella['max_mm_h']:.1f} mm/h, concordi {cella['quota_concordi']:.2f}")
+    if any(c["dist_km"] <= mv.RAGGIO_PASSAGGIO for c in cl):
+        # la pioggia è già entro 5 km: non è più "in avvicinamento" (v5.1)
+        return state, False, info + "; avviso_avvicinamento=0 (pioggia già entro 5 km)"
     if not approach_allowed(state, latest):
         return state, False, info + "; avviso_avvicinamento=0 (già inviato o episodio in corso)"
     send_approach(approach_message(cella, moto, latest, run_dt), latest)
