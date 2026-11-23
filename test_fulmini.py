@@ -288,6 +288,37 @@ class ScaricamentoTest(unittest.TestCase):
         self.assertFalse(att.disponibile)
         self.assertEqual(att.motivo, "errore ConnectionError")
 
+    def test_errore_nostro_con_testo(self):
+        def vuoto(ora):
+            raise fl.ErroreLampi("nessun pacchetto LFL recente")
+        ora = datetime.now(timezone.utc)
+        att = fl.Scaricamento(ora, vuoto).risultato(ora, tempo_max_s=5)
+        self.assertEqual(att.motivo, "errore RuntimeError: nessun pacchetto LFL recente")
+        self.assertIn("non disponibili (errore RuntimeError: nessun pacchetto LFL recente)", att.riga())
+
+    def test_errore_http_solo_codice(self):
+        class Risposta:
+            status_code = 503
+
+        class HTTPError(Exception):
+            def __init__(self):
+                super().__init__("503 Server Error for url: https://segreto?token=abc")
+                self.response = Risposta()
+
+        def guasto(ora):
+            raise HTTPError()
+        ora = datetime.now(timezone.utc)
+        att = fl.Scaricamento(ora, guasto).risultato(ora, tempo_max_s=5)
+        self.assertEqual(att.motivo, "errore HTTPError 503")
+        self.assertNotIn("segreto", att.riga())
+
+    def test_runtimeerror_esterno_senza_testo(self):
+        def guasto(ora):
+            raise RuntimeError("https://segreto?token=abc")
+        ora = datetime.now(timezone.utc)
+        att = fl.Scaricamento(ora, guasto).risultato(ora, tempo_max_s=5)
+        self.assertEqual(att.motivo, "errore RuntimeError")
+
     def test_tempo_scaduto(self):
         import time
 

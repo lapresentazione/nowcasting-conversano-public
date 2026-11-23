@@ -15,6 +15,9 @@ Scelte di Michele (01/11/2026):
 
 Ogni errore resta confinato qui: senza dati satellitari il sistema radar lavora come prima.
 Le chiavi EUMETSAT_CONSUMER_KEY e EUMETSAT_CONSUMER_SECRET non vengono mai stampate.
+
+Versione 5.2 (23/11/2026): nel registro, oltre al tipo di errore, il testo dei messaggi
+scritti qui (ErroreLampi) e il codice HTTP; mai il testo di errori esterni.
 """
 import io
 import math
@@ -103,6 +106,26 @@ def _file_nc(prodotto):
     return [z.read(n) for n in z.namelist() if n.endswith(".nc") and "BODY" in n]
 
 
+class ErroreLampi(RuntimeError):
+    """Errore con testo fisso scritto in questo file: si può riportare nel registro."""
+
+
+def descrivi_errore(error):
+    """Descrizione sicura di un errore per il registro: niente URL, chiavi o testo esterno.
+
+    - ErroreLampi: "RuntimeError: <testo fisso>";
+    - errori HTTP con codice numerico: "<tipo> <codice>" (es. "HTTPError 503");
+    - tutti gli altri: solo il tipo.
+    """
+    if isinstance(error, ErroreLampi):
+        return f"RuntimeError: {error}"
+    nome = type(error).__name__
+    codice = getattr(getattr(error, "response", None), "status_code", None)
+    if isinstance(codice, int) and 100 <= codice <= 599:
+        return f"{nome} {codice}"
+    return nome
+
+
 def scarica(ora_utc, pacchetti=PACCHETTI):
     """Ultimi pacchetti LFL disponibili -> dati per costruisci().
 
@@ -113,14 +136,14 @@ def scarica(ora_utc, pacchetti=PACCHETTI):
     chiave = os.environ.get("EUMETSAT_CONSUMER_KEY", "").strip()
     segreto = os.environ.get("EUMETSAT_CONSUMER_SECRET", "").strip()
     if not chiave or not segreto:
-        raise RuntimeError("chiavi EUMETSAT assenti")
+        raise ErroreLampi("chiavi EUMETSAT assenti")
     token = eumdac.AccessToken((chiave, segreto))
     coll = eumdac.DataStore(token).get_collection(COLLEZIONE)
     dal = ora_utc - timedelta(minutes=10 * pacchetti + 15)
     prodotti = sorted(coll.search(dtstart=dal, dtend=ora_utc),
                       key=lambda p: p.sensing_end)[-pacchetti:]
     if not prodotti:
-        raise RuntimeError("nessun pacchetto LFL recente")
+        raise ErroreLampi("nessun pacchetto LFL recente")
     tt, la, lo = [], [], []
     for p in prodotti:
         for contenuto in _file_nc(p):
@@ -147,8 +170,8 @@ class Scaricamento:
     def _lavora(self, funzione, ora_utc):
         try:
             self.esito = funzione(ora_utc)
-        except Exception as error:  # nessun dettaglio: potrebbe contenere URL o chiavi
-            self.errore = type(error).__name__
+        except Exception as error:  # solo testi sicuri: vedi descrivi_errore
+            self.errore = descrivi_errore(error)
 
     def risultato(self, ora_utc, tempo_max_s=TEMPO_MAX_S):
         """Attività elettrica pronta per l'uso (Attivita), anche se non disponibile."""
