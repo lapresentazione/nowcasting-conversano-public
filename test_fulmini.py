@@ -109,6 +109,29 @@ class AttivitaTest(unittest.TestCase):
         self.assertIn("dati fino alle", riga)
         self.assertIn("vicino 16 km nord", att.registro())
 
+    def test_registro_entro_75_km(self):
+        import re
+        att = att_sintetica([(5, 70, 20), (8, 45, 30), (2, 80, 0), (25, 60, 0)])
+        reg = att.registro()
+        self.assertTrue(reg.startswith("fulmini=0 entro 40 km, 0 entro 30 km in 20 min, dati fino "))
+        self.assertIn(", entro 75 km 2 (vicino 45 km nord-est ", reg)
+        # formato letto dalla verifica settimanale (RE_FUL) invariato
+        re_ful = re.compile(r"fulmini=(\d+) entro 40 km, (\d+) entro 30 km in 20 min"
+                            r"(?:, vicino (\d+) km ([\w-]+) (\d\d:\d\d))?, dati fino (\d\d:\d\d)")
+        m = re_ful.search("evento=x; " + reg + "; avviso_fulmini=0")
+        self.assertIsNotNone(m)
+        self.assertEqual((m[1], m[2], m[3]), ("0", "0", None))
+
+    def test_registro_vicino_e_75_km(self):
+        att = att_sintetica([(3, 25, 90), (6, 66, 180)])
+        reg = att.registro()
+        self.assertIn("fulmini=1 entro 40 km, 1 entro 30 km in 20 min, vicino 25 km est ", reg)
+        self.assertIn(", entro 75 km 2 (vicino 25 km est ", reg)
+
+    def test_registro_nessun_lampo_75_km(self):
+        att = att_sintetica([])
+        self.assertTrue(att.registro().endswith(", entro 75 km 0"))
+
     def test_non_disponibile(self):
         att = fl.Attivita.non_disponibile("tempo scaduto")
         self.assertIn("non disponibili (tempo scaduto)", att.riga())

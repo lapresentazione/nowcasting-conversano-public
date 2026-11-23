@@ -18,6 +18,8 @@ Le chiavi EUMETSAT_CONSUMER_KEY e EUMETSAT_CONSUMER_SECRET non vengono mai stamp
 
 Versione 5.2 (23/11/2026): nel registro, oltre al tipo di errore, il testo dei messaggi
 scritti qui (ErroreLampi) e il codice HTTP; mai il testo di errori esterni.
+Versione 5.3 (23/11/2026): nel registro anche i lampi entro RAGGIO_TENUTI_KM (75 km) negli
+stessi FINESTRA_MIN minuti, con il più vicino: serve solo alla verifica, non ai messaggi.
 """
 import io
 import math
@@ -259,7 +261,15 @@ class Attivita:
                  f"{self.conta(SOGLIA_KM)} entro {SOGLIA_KM} km in {FINESTRA_MIN} min")
         if v:
             testo += f", vicino {v['dist_km']:.0f} km {v['direzione']} {v['ora']}"
-        return testo + f", dati fino {self.ora_fine()}"
+        testo += f", dati fino {self.ora_fine()}"
+        # solo verifica (v5.3): lampi già scaricati entro 75 km, dopo "dati fino" per non
+        # cambiare il formato letto dalla verifica settimanale
+        lontano = self.piu_vicino(RAGGIO_TENUTI_KM)
+        testo += f", entro {RAGGIO_TENUTI_KM} km {self.conta(RAGGIO_TENUTI_KM)}"
+        if lontano:
+            testo += (f" (vicino {lontano['dist_km']:.0f} km {lontano['direzione']} "
+                      f"{lontano['ora']})")
+        return testo
 
 
 def costruisci(dati, ora_utc):
