@@ -3,10 +3,10 @@
   "active": true,
   "level": 2,
   "quiet": 0,
-  "last_scan": 1795829700000,
+  "last_scan": 1795830300000,
   "last_alert_scan": 1795824900000,
   "approach_scan": 1795821900000,
-  "lightning_active": false,
-  "lightning_last_inside": 1795669144940,
-  "lightning_alert": 1794739205000
+  "lightning_active": true,
+  "lightning_last_inside": 1795830595777,
+  "lightning_alert": 1795830608000
 }
